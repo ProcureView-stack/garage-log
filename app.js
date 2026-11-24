@@ -3,12 +3,13 @@
    Garage Log — vehicle service, repair & trip tracker (PWA)
    All data lives on-device in IndexedDB.
    ========================================================= */
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const WHATS_NEW = [
-  ['route', 'Trips', 'Log road trips with start and end odometer, fuel, tolls, food, drinks, accommodation and receipts. Export a trip logbook (CSV) for SARS.'],
-  ['gauge', 'Odometer fixed', 'Shows your most recent reading instead of the highest one, so one typo no longer freezes it.'],
-  ['bell', 'Upcoming fixed', 'Shows every reminder, and tells you when a reminder is replaced by a newer record (with an option to move it).'],
-  ['chart', 'Spending', 'Tap “Spent” to choose This Year, Last 12 Months or All Time and see a breakdown that includes trip costs.'],
+  ['gauge', 'Back-fill in any order', 'Old records never change your current odometer. Tap Update on the odometer to see every reading by date; any that don’t fit (an earlier date with a higher reading) are marked ⚠ so you can fix them.'],
+  ['car', 'Odometer today vs at purchase', 'Vehicle details now keep “Odometer today” and “Odometer at purchase” separate, with the purchase reading dated on your purchase date.'],
+  ['plus', 'Save & Add Another', 'Enter history faster: the next record opens with the same vehicle, type, workshop and date.'],
+  ['bell', 'No more reminder pop-ups', 'A “next due” on an older record is quietly kept as history. Only your newest record of each type drives Upcoming.'],
+  ['route', 'Past trips', 'Picking a past start date marks the trip completed and stops using today’s odometer.'],
 ];
 
 /* ---------- Helpers ---------- */
@@ -137,24 +138,45 @@ const sortRecords = () => S.records.sort(byDateDesc(r => r.date, r => r.date));
 const sortDocs = () => S.docs.sort(byDateDesc(d => d.date, d => d.date));
 const sortTrips = () => S.trips.sort(byDateDesc(t => t.startDate, t => t.startDate));
 
-/* Odometer: the most recent dated reading wins (ties → highest). */
+/* Odometer: every dated reading (records, trips, manual updates, purchase) on one timeline.
+   The most recent date wins (ties → highest), so back-filled history never overrides today. */
 function odoReadings(vid) {
   const v = vehicleById(vid);
   const out = [];
-  if (v && num(v.odo) != null) out.push({ odo: num(v.odo), date: v.odoDate || '', src: 'manual' });
-  for (const r of vehicleRecords(vid)) if (num(r.odo)) out.push({ odo: num(r.odo), date: r.date || '', src: 'record' });
-  for (const t of vehicleTrips(vid)) {
-    if (num(t.odoStart)) out.push({ odo: num(t.odoStart), date: t.startDate || '', src: 'trip' });
-    if (num(t.odoEnd)) out.push({ odo: num(t.odoEnd), date: t.endDate || t.startDate || '', src: 'trip' });
+  if (v) {
+    if (num(v.odo)) out.push({ odo: num(v.odo), date: v.odoDate || '', src: 'vehicle', id: v.id, label: 'Odometer update' });
+    if (num(v.purchaseOdo) && v.purchaseDate) out.push({ odo: num(v.purchaseOdo), date: v.purchaseDate, src: 'vehicle', id: v.id, label: 'At purchase' });
   }
-  return out;
+  for (const r of vehicleRecords(vid)) if (num(r.odo)) out.push({ odo: num(r.odo), date: r.date || '', src: 'record', id: r.id, label: recTitle(r) });
+  for (const t of vehicleTrips(vid)) {
+    if (num(t.odoStart)) out.push({ odo: num(t.odoStart), date: t.startDate || '', src: 'trip', id: t.id, label: `${tripName(t)} (start)` });
+    if (num(t.odoEnd)) out.push({ odo: num(t.odoEnd), date: t.endDate || t.startDate || '', src: 'trip', id: t.id, label: `${tripName(t)} (end)` });
+  }
+  return out.sort((a, b) => b.date.localeCompare(a.date) || b.odo - a.odo);
 }
 function vehicleOdoInfo(v) {
   if (!v) return { odo: 0, date: '' };
-  const rs = odoReadings(v.id).sort((a, b) => b.date.localeCompare(a.date) || b.odo - a.odo);
-  return rs[0] || { odo: 0, date: '' };
+  return odoReadings(v.id)[0] || { odo: 0, date: '' };
 }
 const vehicleOdo = v => vehicleOdoInfo(v).odo;
+/** Readings that don't fit date order (an earlier date with a higher reading than a later date). */
+function odoConflicts(readings) {
+  const bad = new Set();
+  readings.forEach((a, i) => readings.forEach((b, j) => {
+    if (a.date && b.date && a.date < b.date && a.odo > b.odo) { bad.add(i); bad.add(j); }
+  }));
+  return bad;
+}
+/** Live check for a reading being entered: returns a warning string, or ''. */
+function checkReading(vid, date, odo, excludeId) {
+  if (!date || odo == null || !vid) return '';
+  const rs = odoReadings(vid).filter(r => r.id !== excludeId && r.date);
+  const higherBefore = rs.filter(r => r.date < date && r.odo > odo).sort((a, b) => b.odo - a.odo)[0];
+  if (higherBefore) return `Check this reading: ${fmtDist(higherBefore.odo)} was already recorded earlier, on ${fmtDate(higherBefore.date)} (${higherBefore.label}).`;
+  const lowerAfter = rs.filter(r => r.date > date && r.odo < odo).sort((a, b) => a.odo - b.odo)[0];
+  if (lowerAfter) return `Check this reading: a later date, ${fmtDate(lowerAfter.date)} (${lowerAfter.label}), has a lower reading of ${fmtDist(lowerAfter.odo)}.`;
+  return '';
+}
 
 /* Trips */
 const tripDist = t => (num(t.odoEnd) != null && num(t.odoStart) != null) ? Math.max(0, num(t.odoEnd) - num(t.odoStart)) : null;
@@ -539,7 +561,7 @@ function viewGarage() {
       </div>
       <div class="odo">
         <div><div class="odo-label">Odometer</div><div class="odo-val">${fmtNum(odo)}<span>${esc(S.settings.unit)}</span></div>
-        ${odoDate ? `<div class="odo-date">Reading from ${fmtDate(odoDate)}</div>` : ''}</div>
+        ${odoConflicts(odoReadings(v.id)).size ? `<button class="odo-warn" data-action="odo">⚠ Check readings</button>` : odoDate ? `<div class="odo-date">Reading from ${fmtDate(odoDate)}</div>` : ''}</div>
         <button class="pill-btn" data-action="odo">Update</button>
       </div>
       <div class="hero-stats">
@@ -767,10 +789,15 @@ function openVehicleForm(v = null) {
       ${inputField('Engine no.', 'engine', d.engine, { ph: 'Optional', attrs: 'autocapitalize="characters"' })}
       ${inputField('Colour', 'colour', d.colour, { ph: 'Optional' })}
     </div>
-    <div class="section-h">Ownership</div>
+    <div class="section-h">Current odometer</div>
     <div class="group">
-      ${inputField('Odometer', 'odo', d.odo, { mode: 'numeric', ph: '0', unit: S.settings.unit })}
+      ${inputField('Odometer today', 'odo', isNew ? '' : (vehicleOdo(v) || ''), { mode: 'numeric', ph: 'Optional', unit: S.settings.unit })}
+    </div>
+    <div class="section-f">Today's reading only. Leave it empty to use your latest record or trip. An old reading, like the one from when you bought the car, goes under Purchase below.</div>
+    <div class="section-h">Purchase</div>
+    <div class="group">
       ${inputField('Purchased', 'purchaseDate', d.purchaseDate, { type: 'date' })}
+      ${inputField('Odometer at purchase', 'purchaseOdo', d.purchaseOdo, { mode: 'numeric', ph: 'Optional', unit: S.settings.unit })}
       ${inputField('Price paid', 'purchasePrice', d.purchasePrice, { mode: 'decimal', ph: 'Optional' })}
     </div>
     <div class="section-h">Notes</div>
@@ -782,8 +809,12 @@ function openVehicleForm(v = null) {
     onRight: async close => {
       const f = Object.fromEntries(new FormData($('form', sh.body)));
       if (!f.name.trim()) { toast('Please give the vehicle a name', false); $('[name=name]', sh.body).focus(); return; }
-      const rec = { ...(v || { id: uid(), created: Date.now() }), ...f, name: f.name.trim(), odo: num(f.odo) ?? '' };
-      if (!v || num(v.odo) !== rec.odo) rec.odoDate = todayISO();
+      const newOdo = num(f.odo);
+      const rec = { ...(v || { id: uid(), created: Date.now() }), ...f, name: f.name.trim(), purchaseOdo: num(f.purchaseOdo) ?? '' };
+      // Only a changed "Odometer today" becomes a new reading dated today.
+      if (newOdo == null) { rec.odo = ''; rec.odoDate = ''; } // cleared: drop the manual reading, records/trips decide
+      else if (isNew || newOdo !== vehicleOdo(v)) { rec.odo = newOdo; rec.odoDate = todayISO(); }
+      else { rec.odo = v.odo; rec.odoDate = v.odoDate; }
       await DB.put('vehicles', rec);
       if (isNew) { S.vehicles.push(rec); S.settings.vehicleId = rec.id; saveSettings(); }
       else Object.assign(v, rec);
@@ -813,19 +844,40 @@ function openVehicleForm(v = null) {
 function openOdoSheet() {
   const v = curVehicle();
   const cur = vehicleOdoInfo(v);
+  const readings = odoReadings(v.id);
+  const bad = odoConflicts(readings);
+  const shown = readings.slice(0, 60);
   const sh = openSheet({
-    title: 'Update Odometer', small: true, dismissable: true, right: 'Save',
-    body: `<div class="group" style="margin-top:8px">${inputField('Reading', 'odo', '', { mode: 'numeric', ph: fmtNum(cur.odo), unit: S.settings.unit })}</div>
-      <div class="section-f">Current: ${fmtDist(cur.odo)}${cur.date ? ` (from ${fmtDate(cur.date)})` : ''}. The newest reading is always used, so you can also correct a wrong figure here.</div>`,
+    title: 'Odometer', dismissable: true, right: 'Save',
+    body: `<div class="big-total"><div>${fmtDist(cur.odo)}</div><span>${cur.date ? `Latest reading · ${esc(fmtDate(cur.date))} · ${esc(cur.label)}` : 'No readings yet'}</span></div>
+      <div class="section-h">Today's reading</div>
+      <div class="group">${inputField('Odometer now', 'odo', '', { mode: 'numeric', ph: fmtNum(cur.odo), unit: S.settings.unit })}</div>
+      <div class="section-f" id="odo-now-hint">The reading with the latest date is always the current odometer, so back-filling old records never changes it.</div>
+      ${bad.size ? `<div class="notice">${icon('gauge')}<div><b>${bad.size} reading${bad.size === 1 ? '' : 's'} out of order</b>An earlier date has a higher reading than a later date. Tap a reading marked ⚠ to fix its date or odometer.</div></div>` : ''}
+      ${readings.length ? `<div class="section-h">All readings · newest first</div>
+      <div class="group">${shown.map((r, i) => `<button class="row tap" data-act="reading" data-src="${r.src}" data-id="${esc(r.id)}">
+          <div class="row-main"><div class="row-title">${bad.has(i) ? '<span class="warn">⚠ </span>' : ''}${esc(r.label)}</div><div class="row-sub">${esc(fmtDate(r.date) || 'No date')}</div></div>
+          <div class="row-value sm ${bad.has(i) ? 'warn' : ''}">${fmtDist(r.odo)}</div>${icon('chev', 'chev')}</button>`).join('')}</div>
+      ${readings.length > shown.length ? `<div class="section-f">Showing the newest ${shown.length} of ${readings.length} readings.</div>` : ''}` : ''}`,
     onRight: async close => {
       const n = num($('[name=odo]', sh.body).value);
-      if (n == null) { toast('Enter a reading', false); return; }
+      if (n == null) { close(); return; }
       v.odo = n; v.odoDate = todayISO();
       await DB.put('vehicles', v);
       close(); render(); toast('Odometer updated');
     },
   });
-  setTimeout(() => $('[name=odo]', sh.body)?.focus(), 450);
+  $('[name=odo]', sh.body).addEventListener('input', e => {
+    const w = checkReading(v.id, todayISO(), num(e.target.value), null);
+    $('#odo-now-hint', sh.body).innerHTML = w ? `<span class="warn">${esc(w)}</span>` : 'The reading with the latest date is always the current odometer, so back-filling old records never changes it.';
+  });
+  sh.body.addEventListener('click', e => {
+    const el = e.target.closest('[data-act="reading"]');
+    if (!el) return;
+    const { src, id } = el.dataset;
+    sh.close();
+    setTimeout(() => src === 'record' ? openRecordDetail(id) : src === 'trip' ? openTripDetail(id) : openVehicleForm(vehicleById(id)), 250);
+  });
 }
 
 /* =========================================================
@@ -847,7 +899,7 @@ function openRecordForm(existing = null, preset = {}) {
   const v0 = curVehicle();
   const r = existing ? JSON.parse(JSON.stringify(existing)) : {
     id: uid(), created: Date.now(), vehicleId: preset.vehicleId || v0.id, type: preset.type || 'service', title: preset.title || '',
-    date: todayISO(), odo: '', cost: '', workshop: preset.workshop || '', parts: [], notes: '', nextDate: '', nextOdo: '',
+    date: preset.date || todayISO(), odo: '', cost: '', workshop: preset.workshop || '', parts: [], notes: '', nextDate: '', nextOdo: '',
   };
   const workshops = [...new Set(S.records.map(x => x.workshop).filter(Boolean))];
 
@@ -860,10 +912,11 @@ function openRecordForm(existing = null, preset = {}) {
     <div class="section-h">Details</div>
     <div class="group">
       ${inputField('Date', 'date', r.date, { type: 'date' })}
-      ${inputField('Odometer', 'odo', r.odo, { mode: 'numeric', ph: fmtNum(vehicleOdo(vehicleById(r.vehicleId))), unit: S.settings.unit })}
+      ${inputField('Odometer', 'odo', r.odo, { mode: 'numeric', ph: 'Reading on this date', unit: S.settings.unit })}
       ${inputField('Total cost', 'cost', r.cost, { mode: 'decimal', ph: '0.00', unit: S.settings.currency })}
       ${inputField('Workshop', 'workshop', r.workshop, { ph: 'Dealer, mechanic or shop', attrs: 'list="dl-ws"' })}
     </div>
+    <div class="section-f" id="odo-hint"></div>
     <datalist id="dl-ws">${workshops.map(w => `<option value="${esc(w)}">`).join('')}</datalist>
 
     <div class="section-h">Parts &amp; Labour</div>
@@ -884,10 +937,12 @@ function openRecordForm(existing = null, preset = {}) {
 
     <div class="section-h">Invoices &amp; Documents</div>
     <div class="group"><div class="attach-grid"></div>${attachRows}</div>
-    ${isNew ? '' : '<button type="button" class="btn danger" data-act="delete">Delete Record</button>'}
+    ${isNew ? `<button type="button" class="btn tinted" data-act="save-another">${icon('plus')}Save &amp; Add Another</button>
+      <div class="section-f" style="text-align:center">Handy for back-filling: the next record keeps this vehicle, type, workshop and date.</div>`
+      : '<button type="button" class="btn danger" data-act="delete">Delete Record</button>'}
   </form>`;
 
-  const sh = openSheet({ title: isNew ? 'New Record' : 'Edit Record', body, right: isNew ? 'Add' : 'Save', onRight: save });
+  const sh = openSheet({ title: isNew ? 'New Record' : 'Edit Record', body, right: isNew ? 'Add' : 'Save', onRight: close => save(close, false) });
   const form = $('form', sh.body);
   const F = name => form.elements[name];
   const att = attachments(sh.body, S.docs.filter(d => d.recordId === r.id));
@@ -905,24 +960,34 @@ function openRecordForm(existing = null, preset = {}) {
   const draft = () => ({ ...r, vehicleId: F('vehicleId')?.value || r.vehicleId, type: F('type').value, title: F('title').value.trim(), date: F('date').value });
   const updateHint = () => {
     const newer = supersededBy(draft());
-    const hint = $('#due-hint', sh.body);
-    hint.innerHTML = newer
-      ? `<span class="warn">Heads-up: a newer ${esc(TYPES[newer.type].label)} (${esc(fmtDate(newer.date))}) exists, so a reminder on this older record won't show in Upcoming. Put it on the newer record instead.</span>`
+    $('#due-hint', sh.body).textContent = newer
+      ? `Kept as history. You've logged a newer ${TYPES[newer.type].label} (${fmtDate(newer.date)}), so that record's next due is the one shown in Upcoming.`
       : 'A reminder appears on the Garage screen as this comes due.';
   };
-  updateSum(); updateHint();
+  const updateOdoHint = () => {
+    const w = checkReading(draft().vehicleId, F('date').value, num(F('odo').value), r.id);
+    $('#odo-hint', sh.body).innerHTML = w ? `<span class="warn">${esc(w)}</span>` : '';
+  };
+  updateSum(); updateHint(); updateOdoHint();
 
-  form.addEventListener('input', e => { if (e.target.closest('.part-row') || e.target.name === 'cost') updateSum(); if (e.target.name === 'title') updateHint(); });
+  form.addEventListener('input', e => {
+    if (e.target.closest('.part-row') || e.target.name === 'cost') updateSum();
+    if (e.target.name === 'title') updateHint();
+    if (e.target.name === 'odo') updateOdoHint();
+  });
   form.addEventListener('change', e => {
     const n = e.target.name;
     if (n === 'type') F('title').placeholder = TYPES[e.target.value].ph;
-    if (n === 'vehicleId') F('odo').placeholder = fmtNum(vehicleOdo(vehicleById(e.target.value)));
     if (n === 'repeatTime' && e.target.value) F('nextDate').value = addMonths(F('date').value || todayISO(), +e.target.value);
     if (n === 'repeatDist' && e.target.value) {
-      const base = num(F('odo').value) ?? vehicleOdo(vehicleById(F('vehicleId')?.value || r.vehicleId));
+      // Count from this record's own reading; only fall back to the current odometer for a record dated today.
+      let base = num(F('odo').value);
+      if (base == null && F('date').value === todayISO()) base = vehicleOdo(vehicleById(F('vehicleId')?.value || r.vehicleId));
+      if (base == null) { toast('Enter the odometer for this record first', false); e.target.value = ''; F('odo').focus(); return; }
       F('nextOdo').value = base + +e.target.value;
     }
     if (['type', 'vehicleId', 'date', 'title'].includes(n)) updateHint();
+    if (['vehicleId', 'date'].includes(n)) updateOdoHint();
   });
   sh.body.addEventListener('click', async e => {
     const el = e.target.closest('[data-act]');
@@ -930,6 +995,7 @@ function openRecordForm(existing = null, preset = {}) {
     const act = el.dataset.act;
     if (act === 'add-part') { el.insertAdjacentHTML('beforebegin', partRowHTML()); el.previousElementSibling.querySelector('.p-name').focus(); }
     if (act === 'rm-part') { el.closest('.part-row').remove(); updateSum(); }
+    if (act === 'save-another') save(sh.close, true);
     if (act === 'delete') {
       const n = S.docs.filter(d => d.recordId === r.id).length;
       if (!await confirmDestructive('Delete this record?', n ? `Its ${n} attached document${n === 1 ? '' : 's'} will also be deleted.` : 'This cannot be undone.', 'Delete Record')) return;
@@ -938,7 +1004,7 @@ function openRecordForm(existing = null, preset = {}) {
     }
   });
 
-  async function save(close) {
+  async function save(close, another) {
     const f = Object.fromEntries(new FormData(form));
     if (!f.date) { toast('Please choose a date', false); return; }
     const parts = readParts();
@@ -953,33 +1019,10 @@ function openRecordForm(existing = null, preset = {}) {
     if (i >= 0) S.records[i] = out; else S.records.push(out);
     await att.commit({ vehicleId: out.vehicleId, recordId: out.id, baseName: `${recTitle(out)} – Invoice`, category: 'Invoice', date: out.date });
     sortRecords();
-    close(); render(); toast(isNew ? 'Record added' : 'Saved');
-    if (hasReminder(out)) setTimeout(() => explainHiddenReminder(out), 500);
+    close(); render();
+    toast(isNew ? `Added · ${fmtDate(out.date)}` : 'Saved');
+    if (another) setTimeout(() => openRecordForm(null, { vehicleId: out.vehicleId, type: out.type, workshop: out.workshop, date: out.date }), 420);
   }
-}
-
-/** If a reminder was set on a record that a newer one already replaces, say so and offer to move it. */
-function explainHiddenReminder(r) {
-  const newer = supersededBy(r);
-  if (!newer) return;
-  const label = TYPES[newer.type].label;
-  if (hasReminder(newer)) {
-    actionSheet({ title: 'Reminder not shown in Upcoming', message: `A newer ${label} on ${fmtDate(newer.date)} already has its own reminder, so that one is used instead.`, cancelLabel: 'OK' });
-    return;
-  }
-  actionSheet({
-    title: 'Reminder not shown in Upcoming',
-    message: `A newer ${label} on ${fmtDate(newer.date)} exists, so this older one counts as done. Move the reminder to the newer record?`,
-    cancelLabel: 'Keep as History',
-    actions: [{
-      label: 'Move Reminder', handler: async () => {
-        newer.nextDate = r.nextDate; newer.nextOdo = r.nextOdo;
-        r.nextDate = ''; r.nextOdo = '';
-        await DB.put('records', newer); await DB.put('records', r);
-        render(); toast('Reminder moved');
-      },
-    }],
-  });
 }
 
 async function deleteRecord(id) {
@@ -1098,9 +1141,15 @@ function openTripForm(existing = null) {
     cat: $('.e-cat', row).value, amount: num($('.e-amt', row).value), desc: $('.e-desc', row).value.trim(),
     litres: $('.e-cat', row).value === 'fuel' ? num($('.e-l', row).value) : null,
   })).filter(e => e.amount != null || e.desc);
+  let prefill = isNew ? String(t.odoStart) : null;
   const refresh = () => {
     const a = num(F('odoStart').value), b = num(F('odoEnd').value);
-    $('#trip-dist', sh.body).textContent = a != null && b != null ? (b >= a ? `Distance ${fmtDist(b - a)}` : 'End odometer is lower than start.') : '';
+    const vid = F('vehicleId')?.value || t.vehicleId;
+    const warn = checkReading(vid, F('startDate').value, a, t.id) || checkReading(vid, F('endDate').value || F('startDate').value, b, t.id);
+    $('#trip-dist', sh.body).innerHTML = [
+      a != null && b != null ? (b >= a ? `Distance ${fmtDist(b - a)}` : '<span class="warn">End odometer is lower than start.</span>') : '',
+      warn ? `<span class="warn">${esc(warn)}</span>` : '',
+    ].filter(Boolean).join('<br>');
     const ex = readExpenses();
     $('#exp-sum', sh.body).textContent = ex.length ? `${ex.length} expense${ex.length === 1 ? '' : 's'} · Total ${fmtMoney(sum(ex, e => e.amount))}` : '';
     sh.el.querySelector('.sh-right').textContent = isNew ? (F('completed').checked ? 'Add' : 'Start') : 'Save';
@@ -1113,7 +1162,21 @@ function openTripForm(existing = null) {
   });
   form.addEventListener('change', e => {
     if (e.target.classList.contains('e-cat')) $('.e-l', e.target.closest('.exp-row')).hidden = e.target.value !== 'fuel';
-    if (e.target.name === 'vehicleId' && isNew) F('odoStart').value = vehicleOdo(vehicleById(e.target.value)) || '';
+    const past = F('startDate').value && F('startDate').value < todayISO();
+    if (e.target.name === 'vehicleId' && isNew) {
+      const was = F('odoStart').value === prefill;
+      prefill = String(vehicleOdo(vehicleById(e.target.value)) || '');
+      if (was && !past) F('odoStart').value = prefill;
+    }
+    if (e.target.name === 'startDate' && isNew) {
+      // A past trip: it's already finished, and today's odometer doesn't apply to it.
+      if (past) {
+        F('completed').checked = true;
+        if (F('odoStart').value === prefill) F('odoStart').value = '';
+        F('odoStart').placeholder = 'Reading at start';
+        $$('.exp-row', form).forEach(row => { row.dataset.date = F('startDate').value; });
+      } else if (!F('odoStart').value) F('odoStart').value = prefill;
+    }
     refresh();
   });
   sh.body.addEventListener('click', async e => {
@@ -1136,10 +1199,13 @@ function openTripForm(existing = null) {
     if (odoStart != null && odoEnd != null && odoEnd < odoStart) { toast('End odometer is lower than start', false); return; }
     if (f.endDate && f.endDate < f.startDate) { toast('End date is before start date', false); return; }
     const completed = !!f.completed;
+    const endDate = f.endDate || (completed ? f.startDate : '');
+    // Keep every expense inside the trip's dates (so spending periods count it in the right year).
+    const fitDate = d => (!d || d < f.startDate || (endDate && d > endDate)) ? f.startDate : d;
     const out = {
       ...t, vehicleId: f.vehicleId || t.vehicleId, name: f.name.trim(), purpose: f.purpose, from: f.from.trim(), to: f.to.trim(),
-      startDate: f.startDate, endDate: f.endDate || (completed ? f.startDate : ''), odoStart: odoStart ?? '', odoEnd: odoEnd ?? '',
-      completed, expenses: readExpenses().map(e => ({ ...e, date: e.date || f.startDate })), notes: f.notes.trim(), updated: Date.now(),
+      startDate: f.startDate, endDate, odoStart: odoStart ?? '', odoEnd: odoEnd ?? '',
+      completed, expenses: readExpenses().map(e => ({ ...e, date: fitDate(e.date) })), notes: f.notes.trim(), updated: Date.now(),
     };
     await saveTrip(out);
     await att.commit({ vehicleId: out.vehicleId, tripId: out.id, baseName: `${tripName(out)} – Receipt`, category: 'Receipt', date: out.startDate });
@@ -1244,7 +1310,9 @@ function openEndTripSheet(tripId, onSaved) {
   });
   $('[name=odoEnd]', sh.body).addEventListener('input', ev => {
     const n = num(ev.target.value), s = num(t.odoStart);
-    $('#end-dist', sh.body).textContent = n != null && s != null ? (n >= s ? `Distance ${fmtDist(n - s)}` : 'Lower than the start reading') : 'Enter the odometer reading to work out the distance.';
+    const w = checkReading(t.vehicleId, $('[name=endDate]', sh.body).value, n, t.id);
+    $('#end-dist', sh.body).innerHTML = (n != null && s != null ? (n >= s ? `Distance ${fmtDist(n - s)}` : '<span class="warn">Lower than the start reading</span>') : 'Enter the odometer reading to work out the distance.')
+      + (w ? `<br><span class="warn">${esc(w)}</span>` : '');
   });
   setTimeout(() => $('[name=odoEnd]', sh.body)?.focus(), 450);
 }
@@ -1398,6 +1466,15 @@ function openDocForm({ doc = null, files = [] }) {
   const vSel = $('[name=vehicleId]', sh.body);
   if (vSel) vSel.addEventListener('change', () => {
     $('[name=link]', sh.body).closest('.field').outerHTML = linkSelectField(vSel.value, '');
+  });
+  // Scanning an old invoice: linking it to a record or trip takes that date unless you've picked one yourself.
+  let dateTouched = !isNew;
+  sh.body.addEventListener('change', e => {
+    if (e.target.name === 'date') dateTouched = true;
+    if (e.target.name !== 'link' || dateTouched) return;
+    const [k, id] = e.target.value.split(':');
+    const date = k === 'r' ? S.records.find(r => r.id === id)?.date : k === 't' ? S.trips.find(t => t.id === id)?.startDate : null;
+    if (date) $('[name=date]', sh.body).value = date;
   });
 }
 
