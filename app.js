@@ -1,8 +1,15 @@
 'use strict';
 /* =========================================================
-   Garage Log — vehicle service & repair tracker (PWA)
+   Garage Log — vehicle service, repair & trip tracker (PWA)
    All data lives on-device in IndexedDB.
    ========================================================= */
+const APP_VERSION = '1.1.0';
+const WHATS_NEW = [
+  ['route', 'Trips', 'Log road trips with start and end odometer, fuel, tolls, food, drinks, accommodation and receipts. Export a trip logbook (CSV) for SARS.'],
+  ['gauge', 'Odometer fixed', 'Shows your most recent reading instead of the highest one, so one typo no longer freezes it.'],
+  ['bell', 'Upcoming fixed', 'Shows every reminder, and tells you when a reminder is replaced by a newer record (with an option to move it).'],
+  ['chart', 'Spending', 'Tap “Spent” to choose This Year, Last 12 Months or All Time and see a breakdown that includes trip costs.'],
+];
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -15,13 +22,16 @@ const todayISO = () => toISO(new Date());
 const parseISO = s => { if (!s) return null; const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
 const startOfToday = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; };
 const daysUntil = iso => Math.round((parseISO(iso) - startOfToday()) / 86400000);
+const daysBetween = (a, b) => Math.round((parseISO(b) - parseISO(a)) / 86400000);
 const addMonths = (iso, m) => { const d = parseISO(iso) || new Date(); d.setMonth(d.getMonth() + m); return toISO(d); };
 const num = v => {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
   let s = String(v ?? '').replace(/[\s ]/g, '').replace(/[^\d.,-]/g, '');
   if (s.includes(',') && !s.includes('.')) s = s.replace(',', '.'); else s = s.replace(/,/g, '');
   const n = parseFloat(s);
   return Number.isFinite(n) ? n : null;
 };
+const sum = (arr, f) => arr.reduce((s, x) => s + (f(x) || 0), 0);
 const fmtNum = n => Math.round(n).toLocaleString();
 const fmtMoney = n => `${S.settings.currency} ${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const fmtMoneyShort = n => `${S.settings.currency} ${Math.round(n || 0).toLocaleString()}`;
@@ -55,12 +65,24 @@ const ICONS = {
   trash: '<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>',
   x: '<path d="M18 6L6 18M6 6l12 12"/>',
   car: '<path d="M3 17v-4l2-5.5A2 2 0 0 1 6.9 6h10.2a2 2 0 0 1 1.9 1.5L21 13v4a1 1 0 0 1-1 1h-1.5a1 1 0 0 1-1-1v-1h-11v1a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="M3 13h18"/>',
-  folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   bell: '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"/>',
   export: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>',
   import: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>',
   phone: '<rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/>',
   ok: '<circle cx="12" cy="12" r="10"/><path d="M8 12l3 3 5-6"/>',
+  refresh: '<path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
+  chart: '<path d="M18 20V10M12 20V4M6 20v-6"/>',
+  route: '<circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/>',
+  flag: '<path d="M4 22V4M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1"/>',
+  fuel: '<path d="M3 22V5a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v17M2 22h13M3 10h11"/><path d="M14 13h2a2 2 0 0 1 2 2v3a1.5 1.5 0 0 0 3 0V9l-3-3"/>',
+  toll: '<path d="M5 21V7M2 21h6M5 10l16-4v4L5 14"/><path d="M10 9v3M15 8v3"/>',
+  food: '<path d="M3 2v7a3 3 0 0 0 3 3v10M9 2v7a3 3 0 0 1-3 3M6 2v6"/><path d="M18 22V2c-2.5 0-4 2.5-4 7v4h4"/>',
+  cup: '<path d="M17 8h1a4 4 0 0 1 0 8h-1"/><path d="M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4z"/><path d="M6 2v3M10 2v3M14 2v3"/>',
+  bed: '<path d="M2 4v16M2 13h20v7M22 13a4 4 0 0 0-4-4h-8v4"/><circle cx="6" cy="10" r="2"/>',
+  parking: '<rect x="3" y="3" width="18" height="18" rx="4"/><path d="M9 17V7h4a3 3 0 0 1 0 6H9"/>',
+  coins: '<circle cx="9" cy="9" r="6"/><path d="M18.1 10.4A6 6 0 1 1 10.4 18.1"/>',
+  ticket: '<path d="M2 9V6a1 1 0 0 1 1-1h18a1 1 0 0 1 1 1v3a3 3 0 0 0 0 6v3a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-3a3 3 0 0 0 0-6z"/><path d="M13 5v2M13 11v2M13 17v2"/>',
+  drop: '<path d="M12 2.7l5.7 5.7a8 8 0 1 1-11.3 0z"/>',
 };
 const icon = (name, cls = '') => `<svg viewBox="0 0 24 24" class="${cls}">${ICONS[name] || ''}</svg>`;
 
@@ -80,34 +102,96 @@ const TYPES = {
 };
 // Types where any later record of the same type replaces the earlier reminder.
 const RECURRING = new Set(['service', 'tyres', 'brakes', 'battery', 'inspection', 'licence', 'insurance']);
+const EXP = {
+  fuel:    { label: 'Fuel',               short: 'Fuel',   color: 'orange', icon: 'fuel',    ph: 'e.g. Engen Harrismith' },
+  toll:    { label: 'Toll Gates',         short: 'Toll',   color: 'yellow', icon: 'toll',    ph: 'e.g. Wilge Plaza' },
+  food:    { label: 'Food & Snacks',      short: 'Food',   color: 'pink',   icon: 'food',    ph: 'e.g. Wimpy, padkos' },
+  drinks:  { label: 'Drinks',             short: 'Drinks', color: 'teal',   icon: 'cup',     ph: 'e.g. Coffee, cold drinks' },
+  accom:   { label: 'Accommodation',      short: 'Stay',   color: 'indigo', icon: 'bed',     ph: 'e.g. Guest house' },
+  parking: { label: 'Parking',            short: 'Parking',color: 'blue',   icon: 'parking', ph: 'e.g. Airport parking' },
+  tips:    { label: 'Tips & Car Guards',  short: 'Tips',   color: 'green',  icon: 'coins',   ph: 'e.g. Petrol attendant' },
+  fees:    { label: 'Entry & Park Fees',  short: 'Fees',   color: 'mint',   icon: 'ticket',  ph: 'e.g. Kruger gate fee' },
+  carcare: { label: 'Car Wash & Top-ups', short: 'Car',    color: 'purple', icon: 'drop',    ph: 'e.g. Oil, water, wash' },
+  other:   { label: 'Other',              short: 'Other',  color: 'gray',   icon: 'dots',    ph: 'Description' },
+};
+const PURPOSES = ['Leisure', 'Business', 'Family', 'Commute', 'Other'];
+const PERIODS = { year: 'This Year', '12m': 'Last 12 Months', all: 'All Time' };
 const DOC_CATS = ['Invoice', 'Receipt', 'Quotation', 'Licence', 'Insurance', 'Roadworthy', 'Warranty', 'Registration', 'Other'];
 const ACCENTS = { blue: 'Blue', red: 'Red', green: 'Green', orange: 'Orange', purple: 'Purple', teal: 'Teal', pink: 'Pink', gray: 'Graphite' };
 const CURRENCIES = ['R', '$', '€', '£', 'A$', 'C$', '₦', 'KSh', '₹', 'P', 'N$'];
 
 /* ---------- State ---------- */
 const S = {
-  vehicles: [], records: [], docs: [],
-  settings: { unit: 'km', currency: 'R', leadDays: 30, leadDist: 1000, vehicleId: null },
-  tab: 'garage', histType: 'all', histQuery: '', docCat: 'all',
+  vehicles: [], records: [], docs: [], trips: [],
+  settings: { unit: 'km', currency: 'R', leadDays: 30, leadDist: 1000, vehicleId: null, spendPeriod: 'year', seenVersion: null },
+  tab: 'garage', histType: 'all', histQuery: '', docCat: 'all', tripYear: 'all', tripPurpose: 'all',
 };
 const curVehicle = () => S.vehicles.find(v => v.id === S.settings.vehicleId) || S.vehicles[0] || null;
 const vehicleById = id => S.vehicles.find(v => v.id === id);
 const vehicleRecords = id => S.records.filter(r => r.vehicleId === id);
-const vehicleOdo = v => v ? Math.max(num(v.odo) || 0, ...vehicleRecords(v.id).map(r => num(r.odo) || 0)) : 0;
+const vehicleTrips = id => S.trips.filter(t => t.vehicleId === id);
 const vehicleSubtitle = v => [v.year, v.make, v.model].filter(Boolean).join(' ');
 const recTitle = r => r.title || (TYPES[r.type] || TYPES.other).label;
-const sortRecords = () => S.records.sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.created || 0) - (a.created || 0));
-const sortDocs = () => S.docs.sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.created || 0) - (a.created || 0));
+const byDateDesc = (da, db) => (a, b) => (db(b) || '').localeCompare(da(a) || '') || (b.created || 0) - (a.created || 0);
+const sortRecords = () => S.records.sort(byDateDesc(r => r.date, r => r.date));
+const sortDocs = () => S.docs.sort(byDateDesc(d => d.date, d => d.date));
+const sortTrips = () => S.trips.sort(byDateDesc(t => t.startDate, t => t.startDate));
+
+/* Odometer: the most recent dated reading wins (ties → highest). */
+function odoReadings(vid) {
+  const v = vehicleById(vid);
+  const out = [];
+  if (v && num(v.odo) != null) out.push({ odo: num(v.odo), date: v.odoDate || '', src: 'manual' });
+  for (const r of vehicleRecords(vid)) if (num(r.odo)) out.push({ odo: num(r.odo), date: r.date || '', src: 'record' });
+  for (const t of vehicleTrips(vid)) {
+    if (num(t.odoStart)) out.push({ odo: num(t.odoStart), date: t.startDate || '', src: 'trip' });
+    if (num(t.odoEnd)) out.push({ odo: num(t.odoEnd), date: t.endDate || t.startDate || '', src: 'trip' });
+  }
+  return out;
+}
+function vehicleOdoInfo(v) {
+  if (!v) return { odo: 0, date: '' };
+  const rs = odoReadings(v.id).sort((a, b) => b.date.localeCompare(a.date) || b.odo - a.odo);
+  return rs[0] || { odo: 0, date: '' };
+}
+const vehicleOdo = v => vehicleOdoInfo(v).odo;
+
+/* Trips */
+const tripDist = t => (num(t.odoEnd) != null && num(t.odoStart) != null) ? Math.max(0, num(t.odoEnd) - num(t.odoStart)) : null;
+const tripTotal = t => sum(t.expenses || [], e => num(e.amount));
+const tripLitres = t => sum((t.expenses || []).filter(e => e.cat === 'fuel'), e => num(e.litres));
+const tripName = t => t.name || [t.from, t.to].filter(Boolean).join(' → ') || 'Trip';
+const tripDays = t => t.endDate && t.startDate ? daysBetween(t.startDate, t.endDate) + 1 : 1;
+const activeTrips = vid => vehicleTrips(vid).filter(t => !t.completed);
+
+/* Spending */
+function periodStart(p) {
+  if (p === 'year') return `${new Date().getFullYear()}-01-01`;
+  if (p === '12m') { const d = new Date(); d.setFullYear(d.getFullYear() - 1); return toISO(d); }
+  return '';
+}
+const periodShort = p => p === 'year' ? String(new Date().getFullYear()) : p === '12m' ? '12 mo' : 'all time';
+function spendItems(vid, p) {
+  const from = periodStart(p);
+  const items = [];
+  for (const r of vehicleRecords(vid)) if ((r.date || '') >= from && num(r.cost)) items.push({ group: 'maint', key: r.type, amt: num(r.cost) });
+  for (const t of vehicleTrips(vid)) for (const e of t.expenses || []) {
+    if ((e.date || t.startDate || '') >= from && num(e.amount)) items.push({ group: 'trip', key: e.cat, amt: num(e.amount) });
+  }
+  return items;
+}
 
 /* ---------- IndexedDB ---------- */
 let db;
-const STORES = ['vehicles', 'records', 'docs', 'meta'];
+const STORES = ['vehicles', 'records', 'docs', 'trips', 'meta'];
 function openDB() {
   return new Promise((res, rej) => {
-    const r = indexedDB.open('garage-log', 1);
+    // v2 adds the "trips" store. Upgrades only ever ADD stores — existing data is never touched.
+    const r = indexedDB.open('garage-log', 2);
     r.onupgradeneeded = () => STORES.forEach(s => { if (!r.result.objectStoreNames.contains(s)) r.result.createObjectStore(s, { keyPath: 'id' }); });
-    r.onsuccess = () => { db = r.result; res(); };
+    r.onsuccess = () => { db = r.result; db.onversionchange = () => { db.close(); location.reload(); }; res(); };
     r.onerror = () => rej(r.error);
+    r.onblocked = () => toast('Close other Garage Log windows to finish updating', false);
   });
 }
 const idb = r => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
@@ -127,7 +211,7 @@ function toast(msg, ok = true) {
   t.innerHTML = (ok ? icon('ok') : '') + esc(msg);
   t.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), 1900);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
 }
 
 function lockScroll() { document.body.classList.toggle('modal-open', $('#overlay').children.length > 0); }
@@ -158,14 +242,14 @@ function openSheet({ title = '', body = '', left = 'Cancel', right = '', onRight
   return { el: $('.sheet', w), body: $('.sheet-body', w), close };
 }
 
-function actionSheet({ title = '', message = '', actions }) {
+function actionSheet({ title = '', message = '', actions = [], cancelLabel = 'Cancel' }) {
   return new Promise(resolve => {
     const w = document.createElement('div');
     w.className = 'as-wrap';
     const head = (title || message) ? `<div class="ah">${title ? `<b>${esc(title)}</b>` : ''}${message ? esc(message) : ''}</div>` : '';
     w.innerHTML = `<div class="backdrop"></div><div class="asheet">
-      <div class="ag">${head}${actions.map((a, i) => `<button data-i="${i}" class="${a.destructive ? 'destructive' : ''}" ${head && i === 0 ? 'style="border-top:.5px solid var(--sep)"' : ''}>${esc(a.label)}</button>`).join('')}</div>
-      <div class="ag"><button class="cancel" data-i="-1">Cancel</button></div></div>`;
+      <div class="ag">${head}${actions.map((a, i) => `<button data-i="${i}" class="${a.destructive ? 'destructive' : ''}">${esc(a.label)}</button>`).join('')}</div>
+      <div class="ag"><button class="cancel" data-i="-1">${esc(cancelLabel)}</button></div></div>`;
     $('#overlay').appendChild(w);
     lockScroll();
     requestAnimationFrame(() => requestAnimationFrame(() => w.classList.add('open')));
@@ -188,18 +272,26 @@ function typeIcon(type, size = 'row-icon') {
   const t = TYPES[type] || TYPES.other;
   return `<div class="${size}" style="background:${COLORS[t.color]}">${icon(t.icon)}</div>`;
 }
+function expIcon(cat, size = 'row-icon') {
+  const c = EXP[cat] || EXP.other;
+  return `<div class="${size}" style="background:${COLORS[c.color]}">${icon(c.icon)}</div>`;
+}
+const optionsHTML = (options, value) => options.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(value) ? 'selected' : ''}>${esc(l)}</option>`).join('');
 function selectField(label, name, options, value, attrs = '') {
-  return `<div class="field"><label>${esc(label)}</label><select name="${name}" ${attrs}>${options.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(value) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>${icon('updown', 'updown')}</div>`;
+  return `<div class="field"><label>${esc(label)}</label><select name="${name}" ${attrs}>${optionsHTML(options, value)}</select>${icon('updown', 'updown')}</div>`;
 }
 function inputField(label, name, value, { type = 'text', ph = '', mode = '', unit = '', attrs = '' } = {}) {
   return `<div class="field"><label>${esc(label)}</label><input type="${type}" name="${name}" value="${esc(value ?? '')}" placeholder="${esc(ph)}" ${mode ? `inputmode="${mode}"` : ''} ${attrs}>${unit ? `<span class="unit">${esc(unit)}</span>` : ''}</div>`;
 }
 function pillSelect(action, options, value, accent = false) {
   const cur = options.find(([v]) => String(v) === String(value)) || options[0];
-  return `<label class="pill-select ${accent ? 'accent' : ''}">${esc(cur[1])}${icon('down')}<select data-change="${action}">${options.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(value) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>`;
+  return `<label class="pill-select ${accent ? 'accent' : ''}">${esc(cur[1])}${icon('down')}<select data-change="${action}">${optionsHTML(options, value)}</select></label>`;
 }
 const typeOptions = () => Object.entries(TYPES).map(([k, t]) => [k, t.label]);
+const expOptions = () => Object.entries(EXP).map(([k, c]) => [k, c.label]);
 const vehicleOptions = () => S.vehicles.map(v => [v.id, v.name]);
+const attachRows = `<button type="button" class="row tap link" data-act="att-camera">${icon('camera')}Scan with Camera</button>
+      <button type="button" class="row tap link" data-act="att-file">${icon('clip')}Choose Photo or PDF</button>`;
 
 /* ---------- File handling ---------- */
 function pickFiles({ camera = false, accept = 'image/*,application/pdf', multiple = false } = {}) {
@@ -258,19 +350,65 @@ function thumbHTML(d) {
     ? `<div class="doc-thumb" style="background-image:url('${d.thumb}')"></div>`
     : `<div class="doc-thumb">${icon('doc')}</div>`;
 }
+/* Shared attachment handling for record / trip / expense forms. */
+function attachments(sheetBody, existingDocs) {
+  const removed = new Set();
+  const pending = [];
+  const paint = () => {
+    const items = [
+      ...existingDocs.filter(d => !removed.has(d.id)).map(d => ({ key: 'e:' + d.id, d })),
+      ...pending.map((p, i) => ({ key: 'p:' + i, d: p })),
+    ];
+    $('.attach-grid', sheetBody).innerHTML = items.map(({ key, d }) => `<div class="att">${thumbHTML(d)}<button type="button" class="x" data-act="rm-att" data-key="${key}">${icon('x')}</button></div>`).join('');
+  };
+  paint();
+  sheetBody.addEventListener('click', async e => {
+    const el = e.target.closest('[data-act]');
+    if (!el) return;
+    const act = el.dataset.act;
+    if (act === 'att-camera' || act === 'att-file') {
+      const files = await pickFiles({ camera: act === 'att-camera', multiple: act === 'att-file' });
+      pending.push(...await processFiles(files)); paint();
+    }
+    if (act === 'rm-att') {
+      const [k, id] = el.dataset.key.split(':');
+      if (k === 'e') removed.add(id); else pending.splice(+id, 1);
+      paint();
+    }
+  });
+  return {
+    async commit({ vehicleId, recordId = null, tripId = null, baseName, category, date, extra = {} }) {
+      for (const id of removed) { await DB.del('docs', id); S.docs = S.docs.filter(d => d.id !== id); }
+      for (const d of existingDocs) if (!removed.has(d.id) && d.vehicleId !== vehicleId) { d.vehicleId = vehicleId; await DB.put('docs', d); }
+      for (const [i, p] of pending.entries()) {
+        const doc = {
+          id: uid(), created: Date.now() + i, vehicleId, recordId, tripId,
+          name: `${baseName}${pending.length > 1 ? ` ${i + 1}` : ''}`, category, date,
+          mime: p.mime, blob: p.blob, thumb: p.thumb, size: p.size, ...extra,
+        };
+        await DB.put('docs', doc); S.docs.push(doc);
+      }
+      sortDocs();
+    },
+  };
+}
 
 /* ---------- Reminders ---------- */
+const sameKind = (a, b) => a.type === b.type && (RECURRING.has(a.type) || recTitle(a).toLowerCase() === recTitle(b).toLowerCase());
+const isLater = (o, r) => (o.date || '') > (r.date || '') || (o.date === r.date && (o.created || 0) > (r.created || 0));
+const hasReminder = r => !!r.nextDate || num(r.nextOdo) != null;
+/** A reminder is replaced once a newer record of the same kind exists (e.g. the next service was done). */
+function supersededBy(r) {
+  return vehicleRecords(r.vehicleId).filter(o => o.id !== r.id && sameKind(o, r) && isLater(o, r))
+    .sort((a, b) => (b.date || '').localeCompare(a.date || ''))[0] || null;
+}
 function getReminders(vehicleId) {
   const v = vehicleById(vehicleId);
   if (!v) return [];
   const odo = vehicleOdo(v);
-  const recs = vehicleRecords(vehicleId);
-  const same = (a, b) => a.type === b.type && (RECURRING.has(a.type) || recTitle(a).toLowerCase() === recTitle(b).toLowerCase());
-  const later = (o, r) => o.date > r.date || (o.date === r.date && (o.created || 0) > (r.created || 0));
   const out = [];
-  for (const r of recs) {
-    if (!r.nextDate && !num(r.nextOdo)) continue;
-    if (recs.some(o => o.id !== r.id && same(o, r) && later(o, r))) continue;
+  for (const r of vehicleRecords(vehicleId)) {
+    if (!hasReminder(r) || supersededBy(r)) continue;
     const days = r.nextDate ? daysUntil(r.nextDate) : null;
     const dist = num(r.nextOdo) != null ? num(r.nextOdo) - odo : null;
     let status = 'ok';
@@ -295,7 +433,6 @@ function reminderBadge({ days, dist, status }) {
   } else {
     const dTxt = days != null ? (days === 0 ? 'Today' : `in ${daysLabel(days)}`) : null;
     const kTxt = dist != null ? `${fmtNum(dist)} ${S.settings.unit}` : null;
-    // Show whichever comes first (approx 1 day ≈ 50 km for comparison is unreliable — prefer the one flagged)
     if (dTxt && kTxt) txt = (days <= S.settings.leadDays || dist > S.settings.leadDist) ? dTxt : kTxt;
     else txt = dTxt || kTxt;
   }
@@ -321,14 +458,14 @@ function noVehicles(title) {
   return {
     title, action: '',
     body: `<div class="empty"><div class="e-icon">${icon('car')}</div><h3>Add your first vehicle</h3>
-      <p>Track services, repairs, parts and invoices for each vehicle you own.</p>
+      <p>Track services, repairs, parts, trips and invoices for each vehicle you own.</p>
       <button class="btn inline" data-action="add-vehicle">${icon('plus')}Add Vehicle</button></div>`,
   };
 }
 
-function recordRow(r, showVehicle = false) {
+function recordRow(r) {
   const nDocs = S.docs.filter(d => d.recordId === r.id).length;
-  const sub = [fmtDate(r.date), num(r.odo) ? fmtDist(num(r.odo)) : '', showVehicle ? vehicleById(r.vehicleId)?.name : r.workshop].filter(Boolean).map(esc).join(' · ');
+  const sub = [fmtDate(r.date), num(r.odo) ? fmtDist(num(r.odo)) : '', r.workshop].filter(Boolean).map(esc).join(' · ');
   return `<button class="row tap has-icon" data-action="open-record" data-id="${r.id}">
     ${typeIcon(r.type)}
     <div class="row-main"><div class="row-title">${esc(recTitle(r))}</div><div class="row-sub">${sub}${nDocs ? ` · ${icon('clip')}${nDocs}` : ''}</div></div>
@@ -336,32 +473,56 @@ function recordRow(r, showVehicle = false) {
     ${icon('chev', 'chev')}</button>`;
 }
 
+function tripRow(t) {
+  const d = tripDist(t);
+  const days = tripDays(t);
+  const sub = [fmtDate(t.startDate), days > 1 ? `${days} days` : '', d != null ? fmtDist(d) : '', t.purpose].filter(Boolean).map(esc).join(' · ');
+  return `<button class="row tap has-icon" data-action="open-trip" data-id="${t.id}">
+    <div class="row-icon" style="background:${t.completed ? COLORS.blue : COLORS.green}">${icon('route')}</div>
+    <div class="row-main"><div class="row-title">${esc(tripName(t))}${t.completed ? '' : ' <span class="live-tag">Live</span>'}</div><div class="row-sub">${sub}</div></div>
+    <div class="row-value sm">${fmtMoneyShort(tripTotal(t))}</div>${icon('chev', 'chev')}</button>`;
+}
+
+function activeTripCard(t) {
+  const chips = ['fuel', 'toll', 'food', 'drinks'].map(c => `<button class="chip" data-action="trip-exp" data-id="${t.id}" data-cat="${c}">${icon(EXP[c].icon)}${EXP[c].short}</button>`).join('');
+  return `<div class="trip-card">
+    <button class="tc-top" data-action="open-trip" data-id="${t.id}">
+      <div style="min-width:0"><div class="tc-label"><span class="live-dot"></span>Trip in progress</div>
+        <div class="tc-name">${esc(tripName(t))}</div>
+        <div class="tc-sub">Started ${esc(fmtDate(t.startDate))}${num(t.odoStart) ? ` at ${fmtDist(num(t.odoStart))}` : ''}</div></div>
+      <div class="tc-total">${fmtMoneyShort(tripTotal(t))}<span>${(t.expenses || []).length} expenses</span></div>
+    </button>
+    <div class="chips">${chips}<button class="chip" data-action="trip-exp" data-id="${t.id}" data-cat="other">${icon('plus')}More</button></div>
+    <button class="btn" data-action="end-trip" data-id="${t.id}">${icon('flag')}End Trip</button>
+  </div>`;
+}
+
 function viewGarage() {
   if (!S.vehicles.length) return noVehicles('Garage');
   const v = curVehicle();
   const recs = vehicleRecords(v.id);
-  const odo = vehicleOdo(v);
-  const year = String(new Date().getFullYear());
-  const spend = recs.filter(r => (r.date || '').startsWith(year)).reduce((s, r) => s + (num(r.cost) || 0), 0);
+  const { odo, date: odoDate } = vehicleOdoInfo(v);
+  const period = S.settings.spendPeriod;
+  const spend = sum(spendItems(v.id, period), i => i.amt);
   const lastSvc = recs.find(r => r.type === 'service');
   const reminders = getReminders(v.id);
   const accent = COLORS[v.accent] || COLORS.blue;
-  const odoDate = v.odoDate || recs.find(r => num(r.odo))?.date;
+  const live = activeTrips(v.id);
 
   const quick = [
     ['new-record', 'service', 'wrench', 'Service', COLORS.blue],
     ['new-record', 'repair', 'hammer', 'Repair', COLORS.orange],
-    ['new-record', 'parts', 'cog', 'Parts', COLORS.purple],
-    ['scan', '', 'camera', 'Scan', COLORS.green],
+    ['trip-quick', '', 'route', 'Trip', COLORS.green],
+    ['scan', '', 'camera', 'Scan', COLORS.purple],
   ].map(([a, t, ic, l, c]) => `<button data-action="${a}" data-type="${t}"><span class="qi" style="background:${c}2b;color:${c}">${icon(ic)}</span>${l}</button>`).join('');
 
   const remHTML = reminders.length
-    ? `<div class="group">${reminders.slice(0, 6).map(x => {
-        const bits = [x.r.nextDate ? `Due ${fmtDate(x.r.nextDate)}` : '', num(x.r.nextOdo) ? `at ${fmtDist(num(x.r.nextOdo))}` : ''].filter(Boolean).join(' or ');
+    ? `<div class="group">${reminders.map(x => {
+        const bits = [x.r.nextDate ? `Due ${fmtDate(x.r.nextDate)}` : '', num(x.r.nextOdo) != null ? `at ${fmtDist(num(x.r.nextOdo))}` : ''].filter(Boolean).join(' or ');
         return `<button class="row tap has-icon" data-action="reminder" data-id="${x.r.id}">${typeIcon(x.r.type)}
           <div class="row-main"><div class="row-title">${esc(recTitle(x.r))}</div><div class="row-sub">${esc(bits)}</div></div>${reminderBadge(x)}</button>`;
       }).join('')}</div>`
-    : `<div class="empty sm">Nothing due. Add a “Next Due” date or ${esc(S.settings.unit)} when you log a service and it'll appear here.</div>`;
+    : `<div class="empty sm">Nothing due. Add a “Next Due” date or ${esc(S.settings.unit)} to your most recent service and it'll appear here.</div>`;
 
   const recentHTML = recs.length
     ? `<div class="group">${recs.slice(0, 5).map(r => recordRow(r)).join('')}</div>`
@@ -378,17 +539,18 @@ function viewGarage() {
       </div>
       <div class="odo">
         <div><div class="odo-label">Odometer</div><div class="odo-val">${fmtNum(odo)}<span>${esc(S.settings.unit)}</span></div>
-        ${odoDate ? `<div class="odo-date">Updated ${fmtDate(odoDate)}</div>` : ''}</div>
+        ${odoDate ? `<div class="odo-date">Reading from ${fmtDate(odoDate)}</div>` : ''}</div>
         <button class="pill-btn" data-action="odo">Update</button>
       </div>
       <div class="hero-stats">
-        <div><b>${fmtMoneyShort(spend)}</b><span>Spent ${year}</span></div>
-        <div><b>${recs.length}</b><span>Records</span></div>
+        <button data-action="spending"><b>${fmtMoneyShort(spend)}</b><span>Spent ${esc(periodShort(period))} ${icon('down')}</span></button>
+        <button data-action="tab" data-tab="history"><b>${recs.length}</b><span>Records</span></button>
         <div><b>${lastSvc ? esc(fmtDate(lastSvc.date)) : '—'}</b><span>Last service</span></div>
       </div>
     </div>
+    ${live.map(activeTripCard).join('')}
     <div class="quick">${quick}</div>
-    <div class="section-title">Upcoming</div>${remHTML}
+    <div class="section-title">Upcoming ${reminders.length ? `<span class="count">${reminders.length}</span>` : ''}</div>${remHTML}
     <div class="section-title">Recent Activity ${recs.length > 5 ? '<button data-action="tab" data-tab="history">See All</button>' : ''}</div>${recentHTML}`,
   };
 }
@@ -400,7 +562,7 @@ function historyList() {
   const q = S.histQuery.trim().toLowerCase();
   if (q) recs = recs.filter(r => [recTitle(r), r.workshop, r.notes, TYPES[r.type]?.label, ...(r.parts || []).flatMap(p => [p.name, p.partNo])].join(' ').toLowerCase().includes(q));
   if (!recs.length) return `<div class="empty sm">${q || S.histType !== 'all' ? 'No matching records.' : 'No records yet for this vehicle.'}</div>`;
-  const total = recs.reduce((s, r) => s + (num(r.cost) || 0), 0);
+  const total = sum(recs, r => num(r.cost));
   const groups = {};
   recs.forEach(r => (groups[(r.date || '0000-00').slice(0, 7)] ||= []).push(r));
   return `<div class="summary"><span>${recs.length} record${recs.length === 1 ? '' : 's'}</span><span>Total ${fmtMoney(total)}</span></div>` +
@@ -421,6 +583,56 @@ function viewHistory() {
   };
 }
 
+function filteredTrips() {
+  let trips = vehicleTrips(curVehicle().id);
+  if (S.tripYear !== 'all') trips = trips.filter(t => (t.startDate || '').startsWith(S.tripYear));
+  if (S.tripPurpose !== 'all') trips = trips.filter(t => t.purpose === S.tripPurpose);
+  return trips;
+}
+
+function viewTrips() {
+  if (!S.vehicles.length) return noVehicles('Trips');
+  const v = curVehicle();
+  const all = vehicleTrips(v.id);
+  const live = all.filter(t => !t.completed);
+  const years = [...new Set(all.map(t => (t.startDate || '').slice(0, 4)).filter(Boolean))].sort().reverse();
+  if (S.tripYear !== 'all' && !years.includes(S.tripYear)) S.tripYear = 'all';
+  const trips = filteredTrips();
+  const done = trips.filter(t => t.completed);
+  const km = sum(trips, tripDist);
+  const spent = sum(trips, tripTotal);
+
+  if (!all.length) {
+    return {
+      title: 'Trips', action: addBtn('new-trip'),
+      body: `${vehicleSwitcher()}<div class="empty"><div class="e-icon">${icon('route')}</div><h3>No trips yet</h3>
+        <p>Start a trip before you leave, then log fuel, tolls, food and drinks along the way. End it with your odometer reading to get distance and cost per ${esc(S.settings.unit)}.</p>
+        <button class="btn inline" data-action="new-trip">${icon('plus')}Start a Trip</button></div>`,
+    };
+  }
+  const groups = {};
+  done.forEach(t => (groups[(t.startDate || '0000-00').slice(0, 7)] ||= []).push(t));
+  return {
+    title: 'Trips',
+    action: addBtn('new-trip'),
+    body: `${vehicleSwitcher()}
+      ${live.map(activeTripCard).join('')}
+      <div class="toolbar">
+        ${pillSelect('trip-year', [['all', 'All Years'], ...years.map(y => [y, y])], S.tripYear)}
+        ${pillSelect('trip-purpose', [['all', 'All Purposes'], ...PURPOSES.map(p => [p, p])], S.tripPurpose)}
+      </div>
+      <div class="stat-grid">
+        <div><b>${trips.length}</b><span>Trips</span></div>
+        <div><b>${fmtNum(km)}</b><span>${esc(S.settings.unit)} driven</span></div>
+        <div><b>${fmtMoneyShort(spent)}</b><span>Spent</span></div>
+      </div>
+      ${done.length ? Object.entries(groups).map(([k, ts]) => `<div class="section-h" style="margin-top:18px">${esc(fmtMonth(k))}</div><div class="group">${ts.map(tripRow).join('')}</div>`).join('')
+        : `<div class="empty sm" style="margin-top:16px">No completed trips${S.tripYear !== 'all' || S.tripPurpose !== 'all' ? ' match these filters' : ' yet'}.</div>`}
+      <div class="group" style="margin-top:24px"><button class="row tap link" data-action="export-trips">${icon('export')}Export Trip Logbook (CSV)</button></div>
+      <div class="section-f">Exports the trips shown above. Business trips can be used for a SARS travel logbook.</div>`,
+  };
+}
+
 function viewDocs() {
   if (!S.vehicles.length) return noVehicles('Documents');
   const v = curVehicle();
@@ -428,7 +640,7 @@ function viewDocs() {
   if (S.docCat !== 'all') docs = docs.filter(d => d.category === S.docCat);
   const grid = docs.length
     ? `<div class="doc-grid">${docs.map(d => `<button class="doc-tile" data-action="open-doc" data-id="${d.id}">${thumbHTML(d)}<div class="doc-name">${esc(d.name)}</div><div class="doc-meta">${esc(d.category)} · ${esc(fmtDate(d.date))}</div></button>`).join('')}</div>`
-    : `<div class="empty"><div class="e-icon">${icon('doc')}</div><h3>No documents</h3><p>Scan invoices, receipts, licence discs and insurance papers to keep them with your records.</p>
+    : `<div class="empty"><div class="e-icon">${icon('doc')}</div><h3>No documents</h3><p>Scan invoices, receipts, licence discs and insurance papers to keep them with your records and trips.</p>
        <button class="btn inline" data-action="scan">${icon('camera')}Scan Document</button></div>`;
   return {
     title: 'Documents',
@@ -454,6 +666,7 @@ function viewSettings() {
     <div class="group">
       ${selectField('Distance', 'unit', [['km', 'Kilometres (km)'], ['mi', 'Miles (mi)']], S.settings.unit, 'data-setting="unit"')}
       ${selectField('Currency', 'currency', CURRENCIES.map(c => [c, c]), S.settings.currency, 'data-setting="currency"')}
+      ${selectField('Spent period', 'spendPeriod', Object.entries(PERIODS), S.settings.spendPeriod, 'data-setting="spendPeriod"')}
       ${selectField('Due soon (time)', 'leadDays', [[14, '2 weeks before'], [30, '1 month before'], [60, '2 months before'], [90, '3 months before']], S.settings.leadDays, 'data-setting="leadDays"')}
       ${selectField('Due soon (distance)', 'leadDist', [500, 1000, 2000, 3000, 5000].map(n => [n, `${fmtNum(n)} ${S.settings.unit} before`]), S.settings.leadDist, 'data-setting="leadDist"')}
     </div>
@@ -466,18 +679,25 @@ function viewSettings() {
     </div>
     <div class="section-f">Everything is stored privately on this device. Export a backup regularly and keep it in iCloud Drive or Files.</div>
 
+    <div class="section-h">App</div>
+    <div class="group">
+      <div class="row"><div class="row-main">Version</div><div class="row-value">${APP_VERSION}</div></div>
+      <button class="row tap link" data-action="check-update">${icon('refresh')}Check for Updates</button>
+      <button class="row tap link" data-action="whats-new">${icon('bell')}What's New</button>
+    </div>
+
     ${standalone ? '' : `<div class="section-h">Install</div>
     <div class="group"><div class="row has-icon"><div class="row-icon" style="background:${COLORS.blue}">${icon('phone')}</div>
       <div class="row-main"><div class="row-title">Add to Home Screen</div><div class="row-sub" style="white-space:normal">In Safari tap Share ${icon('share')} then “Add to Home Screen”.</div></div></div></div>`}
 
     <div class="section-h">&nbsp;</div>
     <div class="group"><button class="row tap danger" data-action="erase">Erase All Data</button></div>
-    <div class="footer-note">Garage Log · v1.0<br>${S.vehicles.length} vehicles · ${S.records.length} records · ${S.docs.length} documents</div>`,
+    <div class="footer-note">Garage Log · v${APP_VERSION}<br>${S.vehicles.length} vehicles · ${S.records.length} records · ${S.trips.length} trips · ${S.docs.length} documents</div>`,
   };
 }
 
 function render() {
-  const view = { garage: viewGarage, history: viewHistory, docs: viewDocs, settings: viewSettings }[S.tab]();
+  const view = { garage: viewGarage, history: viewHistory, trips: viewTrips, docs: viewDocs, settings: viewSettings }[S.tab]();
   $('#view').innerHTML = navbar(view.title, view.action) + `<h1 class="large-title">${esc(view.title)}</h1>` + view.body;
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === S.tab));
   onScroll();
@@ -487,6 +707,43 @@ function render() {
 }
 function onScroll() { document.body.classList.toggle('scrolled', window.scrollY > 32); }
 window.addEventListener('scroll', onScroll, { passive: true });
+
+/* =========================================================
+   Spending breakdown
+   ========================================================= */
+function openSpendingSheet() {
+  const v = curVehicle();
+  const sh = openSheet({ title: 'Spending', left: 'Done', dismissable: true });
+  const paint = () => {
+    const p = S.settings.spendPeriod;
+    const items = spendItems(v.id, p);
+    const total = sum(items, i => i.amt);
+    const section = (group, title, meta) => {
+      const m = {};
+      items.filter(i => i.group === group).forEach(i => { m[i.key] = (m[i.key] || 0) + i.amt; });
+      const rows = Object.entries(m).sort((a, b) => b[1] - a[1]);
+      const gTotal = sum(rows, r => r[1]);
+      if (!rows.length) return `<div class="section-h">${esc(title)}</div><div class="empty sm">Nothing in this period.</div>`;
+      return `<div class="section-h">${esc(title)} · ${fmtMoneyShort(gTotal)}</div><div class="group">${rows.map(([k, amt]) => {
+        const c = meta[k] || meta.other;
+        return `<div class="row has-icon"><div class="row-icon" style="background:${COLORS[c.color]}">${icon(c.icon)}</div>
+          <div class="row-main"><div class="row-title">${esc(c.label)}</div><div class="bar"><i style="width:${Math.max(2, amt / gTotal * 100).toFixed(1)}%;background:${COLORS[c.color]}"></i></div></div>
+          <div class="row-value sm">${fmtMoneyShort(amt)}</div></div>`;
+      }).join('')}</div>`;
+    };
+    sh.body.innerHTML = `<div class="toolbar" style="justify-content:center;margin-top:10px">${pillSelect('spend-period', Object.entries(PERIODS), p, true)}</div>
+      <div class="big-total"><div>${fmtMoney(total)}</div><span>${esc(v.name)} · ${esc(PERIODS[p])}</span></div>
+      ${section('maint', 'Maintenance & Repairs', TYPES)}
+      ${section('trip', 'Trips', EXP)}
+      <div class="section-f">Counted by the date of each record and trip expense.</div>`;
+  };
+  paint();
+  sh.body.addEventListener('change', e => {
+    if (e.target.dataset.change !== 'spend-period') return;
+    e.stopPropagation();
+    S.settings.spendPeriod = e.target.value; saveSettings(); paint(); render();
+  });
+}
 
 /* =========================================================
    Vehicle form
@@ -535,12 +792,14 @@ function openVehicleForm(v = null) {
   });
   sh.body.addEventListener('click', async e => {
     if (!e.target.closest('[data-act="delete"]')) return;
-    const n = vehicleRecords(v.id).length;
-    if (!await confirmDestructive(`Delete ${v.name}?`, `This permanently removes the vehicle, its ${n} record${n === 1 ? '' : 's'} and all its documents.`, 'Delete Vehicle')) return;
+    const n = vehicleRecords(v.id).length, nt = vehicleTrips(v.id).length;
+    if (!await confirmDestructive(`Delete ${v.name}?`, `This permanently removes the vehicle, its ${n} record${n === 1 ? '' : 's'}, ${nt} trip${nt === 1 ? '' : 's'} and all its documents.`, 'Delete Vehicle')) return;
     for (const r of vehicleRecords(v.id)) await DB.del('records', r.id);
+    for (const t of vehicleTrips(v.id)) await DB.del('trips', t.id);
     for (const d of S.docs.filter(d => d.vehicleId === v.id)) await DB.del('docs', d.id);
     await DB.del('vehicles', v.id);
     S.records = S.records.filter(r => r.vehicleId !== v.id);
+    S.trips = S.trips.filter(t => t.vehicleId !== v.id);
     S.docs = S.docs.filter(d => d.vehicleId !== v.id);
     S.vehicles = S.vehicles.filter(x => x.id !== v.id);
     if (S.settings.vehicleId === v.id) { S.settings.vehicleId = S.vehicles[0]?.id || null; saveSettings(); }
@@ -553,10 +812,11 @@ function openVehicleForm(v = null) {
    ========================================================= */
 function openOdoSheet() {
   const v = curVehicle();
+  const cur = vehicleOdoInfo(v);
   const sh = openSheet({
     title: 'Update Odometer', small: true, dismissable: true, right: 'Save',
-    body: `<div class="group" style="margin-top:8px">${inputField('Reading', 'odo', '', { mode: 'numeric', ph: fmtNum(vehicleOdo(v)), unit: S.settings.unit, attrs: 'autofocus' })}</div>
-      <div class="section-f">Current: ${fmtDist(vehicleOdo(v))}. Readings from records are used automatically if they're higher.</div>`,
+    body: `<div class="group" style="margin-top:8px">${inputField('Reading', 'odo', '', { mode: 'numeric', ph: fmtNum(cur.odo), unit: S.settings.unit })}</div>
+      <div class="section-f">Current: ${fmtDist(cur.odo)}${cur.date ? ` (from ${fmtDate(cur.date)})` : ''}. The newest reading is always used, so you can also correct a wrong figure here.</div>`,
     onRight: async close => {
       const n = num($('[name=odo]', sh.body).value);
       if (n == null) { toast('Enter a reading', false); return; }
@@ -589,9 +849,6 @@ function openRecordForm(existing = null, preset = {}) {
     id: uid(), created: Date.now(), vehicleId: preset.vehicleId || v0.id, type: preset.type || 'service', title: preset.title || '',
     date: todayISO(), odo: '', cost: '', workshop: preset.workshop || '', parts: [], notes: '', nextDate: '', nextOdo: '',
   };
-  const existingDocs = S.docs.filter(d => d.recordId === r.id);
-  const removedDocs = new Set();
-  const pending = [];
   const workshops = [...new Set(S.records.map(x => x.workshop).filter(Boolean))];
 
   const body = `<form autocomplete="off">
@@ -620,44 +877,42 @@ function openRecordForm(existing = null, preset = {}) {
       ${inputField('Next date', 'nextDate', r.nextDate, { type: 'date' })}
       ${inputField('Next odometer', 'nextOdo', r.nextOdo, { mode: 'numeric', ph: 'Optional', unit: S.settings.unit })}
     </div>
-    <div class="section-f">A reminder appears on the Garage screen as this comes due.</div>
+    <div class="section-f" id="due-hint">A reminder appears on the Garage screen as this comes due.</div>
 
     <div class="section-h">Notes</div>
     <div class="group"><div class="field"><textarea name="notes" placeholder="What was done, warranty info, advice from the mechanic…">${esc(r.notes || '')}</textarea></div></div>
 
     <div class="section-h">Invoices &amp; Documents</div>
-    <div class="group">
-      <div class="attach-grid" id="att"></div>
-      <button type="button" class="row tap link" data-act="att-camera">${icon('camera')}Scan with Camera</button>
-      <button type="button" class="row tap link" data-act="att-file">${icon('clip')}Choose Photo or PDF</button>
-    </div>
+    <div class="group"><div class="attach-grid"></div>${attachRows}</div>
     ${isNew ? '' : '<button type="button" class="btn danger" data-act="delete">Delete Record</button>'}
   </form>`;
 
   const sh = openSheet({ title: isNew ? 'New Record' : 'Edit Record', body, right: isNew ? 'Add' : 'Save', onRight: save });
   const form = $('form', sh.body);
   const F = name => form.elements[name];
+  const att = attachments(sh.body, S.docs.filter(d => d.recordId === r.id));
 
   const readParts = () => $$('.part-row', form).map(row => ({
     name: $('.p-name', row).value.trim(), partNo: $('.p-no', row).value.trim(),
     qty: num($('.p-qty', row).value), cost: num($('.p-cost', row).value),
   })).filter(p => p.name || p.partNo || p.cost);
-  const partsTotal = () => readParts().reduce((s, p) => s + (p.cost || 0), 0);
+  const partsTotal = () => sum(readParts(), p => p.cost);
   const updateSum = () => {
     const t = partsTotal();
     $('#parts-sum', sh.body).textContent = t ? `Parts total ${fmtMoney(t)}${F('cost').value ? '' : ' — used as total cost if left blank.'}` : '';
     F('cost').placeholder = t ? t.toFixed(2) : '0.00';
   };
-  const renderAtt = () => {
-    const items = [
-      ...existingDocs.filter(d => !removedDocs.has(d.id)).map(d => ({ key: 'e:' + d.id, d })),
-      ...pending.map((p, i) => ({ key: 'p:' + i, d: p })),
-    ];
-    $('#att', sh.body).innerHTML = items.map(({ key, d }) => `<div class="att">${thumbHTML(d)}<button type="button" class="x" data-act="rm-att" data-key="${key}">${icon('x')}</button></div>`).join('');
+  const draft = () => ({ ...r, vehicleId: F('vehicleId')?.value || r.vehicleId, type: F('type').value, title: F('title').value.trim(), date: F('date').value });
+  const updateHint = () => {
+    const newer = supersededBy(draft());
+    const hint = $('#due-hint', sh.body);
+    hint.innerHTML = newer
+      ? `<span class="warn">Heads-up: a newer ${esc(TYPES[newer.type].label)} (${esc(fmtDate(newer.date))}) exists, so a reminder on this older record won't show in Upcoming. Put it on the newer record instead.</span>`
+      : 'A reminder appears on the Garage screen as this comes due.';
   };
-  renderAtt(); updateSum();
+  updateSum(); updateHint();
 
-  form.addEventListener('input', e => { if (e.target.closest('.part-row') || e.target.name === 'cost') updateSum(); });
+  form.addEventListener('input', e => { if (e.target.closest('.part-row') || e.target.name === 'cost') updateSum(); if (e.target.name === 'title') updateHint(); });
   form.addEventListener('change', e => {
     const n = e.target.name;
     if (n === 'type') F('title').placeholder = TYPES[e.target.value].ph;
@@ -667,6 +922,7 @@ function openRecordForm(existing = null, preset = {}) {
       const base = num(F('odo').value) ?? vehicleOdo(vehicleById(F('vehicleId')?.value || r.vehicleId));
       F('nextOdo').value = base + +e.target.value;
     }
+    if (['type', 'vehicleId', 'date', 'title'].includes(n)) updateHint();
   });
   sh.body.addEventListener('click', async e => {
     const el = e.target.closest('[data-act]');
@@ -674,17 +930,8 @@ function openRecordForm(existing = null, preset = {}) {
     const act = el.dataset.act;
     if (act === 'add-part') { el.insertAdjacentHTML('beforebegin', partRowHTML()); el.previousElementSibling.querySelector('.p-name').focus(); }
     if (act === 'rm-part') { el.closest('.part-row').remove(); updateSum(); }
-    if (act === 'att-camera' || act === 'att-file') {
-      const files = await pickFiles({ camera: act === 'att-camera', multiple: act === 'att-file' });
-      pending.push(...await processFiles(files)); renderAtt();
-    }
-    if (act === 'rm-att') {
-      const [k, id] = el.dataset.key.split(':');
-      if (k === 'e') removedDocs.add(id); else pending.splice(+id, 1);
-      renderAtt();
-    }
     if (act === 'delete') {
-      const n = existingDocs.length;
+      const n = S.docs.filter(d => d.recordId === r.id).length;
       if (!await confirmDestructive('Delete this record?', n ? `Its ${n} attached document${n === 1 ? '' : 's'} will also be deleted.` : 'This cannot be undone.', 'Delete Record')) return;
       await deleteRecord(r.id);
       sh.close(); render(); toast('Record deleted');
@@ -704,19 +951,35 @@ function openRecordForm(existing = null, preset = {}) {
     await DB.put('records', out);
     const i = S.records.findIndex(x => x.id === out.id);
     if (i >= 0) S.records[i] = out; else S.records.push(out);
-    for (const id of removedDocs) { await DB.del('docs', id); S.docs = S.docs.filter(d => d.id !== id); }
-    for (const d of existingDocs) if (!removedDocs.has(d.id) && d.vehicleId !== out.vehicleId) { d.vehicleId = out.vehicleId; await DB.put('docs', d); }
-    for (const [i2, p] of pending.entries()) {
-      const doc = {
-        id: uid(), created: Date.now() + i2, vehicleId: out.vehicleId, recordId: out.id,
-        name: `${recTitle(out)} – Invoice${pending.length > 1 ? ` ${i2 + 1}` : ''}`, category: 'Invoice', date: out.date,
-        mime: p.mime, blob: p.blob, thumb: p.thumb, size: p.size,
-      };
-      await DB.put('docs', doc); S.docs.push(doc);
-    }
-    sortRecords(); sortDocs();
+    await att.commit({ vehicleId: out.vehicleId, recordId: out.id, baseName: `${recTitle(out)} – Invoice`, category: 'Invoice', date: out.date });
+    sortRecords();
     close(); render(); toast(isNew ? 'Record added' : 'Saved');
+    if (hasReminder(out)) setTimeout(() => explainHiddenReminder(out), 500);
   }
+}
+
+/** If a reminder was set on a record that a newer one already replaces, say so and offer to move it. */
+function explainHiddenReminder(r) {
+  const newer = supersededBy(r);
+  if (!newer) return;
+  const label = TYPES[newer.type].label;
+  if (hasReminder(newer)) {
+    actionSheet({ title: 'Reminder not shown in Upcoming', message: `A newer ${label} on ${fmtDate(newer.date)} already has its own reminder, so that one is used instead.`, cancelLabel: 'OK' });
+    return;
+  }
+  actionSheet({
+    title: 'Reminder not shown in Upcoming',
+    message: `A newer ${label} on ${fmtDate(newer.date)} exists, so this older one counts as done. Move the reminder to the newer record?`,
+    cancelLabel: 'Keep as History',
+    actions: [{
+      label: 'Move Reminder', handler: async () => {
+        newer.nextDate = r.nextDate; newer.nextOdo = r.nextOdo;
+        r.nextDate = ''; r.nextOdo = '';
+        await DB.put('records', newer); await DB.put('records', r);
+        render(); toast('Reminder moved');
+      },
+    }],
+  });
 }
 
 async function deleteRecord(id) {
@@ -735,6 +998,7 @@ function openRecordDetail(id) {
   const t = TYPES[r.type] || TYPES.other;
   const v = vehicleById(r.vehicleId);
   const docs = S.docs.filter(d => d.recordId === r.id);
+  const newer = hasReminder(r) ? supersededBy(r) : null;
   const info = [
     ['Vehicle', v?.name], ['Date', fmtDate(r.date)], ['Odometer', num(r.odo) ? fmtDist(num(r.odo)) : ''],
     ['Workshop', r.workshop], ['Total cost', num(r.cost) ? fmtMoney(num(r.cost)) : ''],
@@ -744,31 +1008,357 @@ function openRecordDetail(id) {
     <div class="detail-head">${typeIcon(r.type, 'big-icon')}<h2>${esc(recTitle(r))}</h2><p>${esc(t.label)}</p></div>
     <div class="group" style="margin-top:18px">${info.map(([k, val]) => `<div class="row"><div class="row-main">${esc(k)}</div><div class="row-value">${esc(val)}</div></div>`).join('')}</div>
     ${parts.length ? `<div class="section-h">Parts &amp; Labour</div><div class="group">${parts.map(p => `<div class="row"><div class="row-main"><div class="row-title">${esc(p.name || p.partNo)}</div>${(p.partNo && p.name) || p.qty ? `<div class="row-sub">${esc([p.name && p.partNo ? `#${p.partNo}` : '', p.qty ? `Qty ${p.qty}` : ''].filter(Boolean).join(' · '))}</div>` : ''}</div>${p.cost ? `<div class="row-value sm">${fmtMoney(p.cost)}</div>` : ''}</div>`).join('')}</div>` : ''}
-    ${r.nextDate || num(r.nextOdo) ? `<div class="section-h">Next Due</div><div class="group">
+    ${hasReminder(r) ? `<div class="section-h">Next Due</div><div class="group">
         ${r.nextDate ? `<div class="row"><div class="row-main">Date</div><div class="row-value">${esc(fmtDate(r.nextDate))}</div></div>` : ''}
-        ${num(r.nextOdo) ? `<div class="row"><div class="row-main">Odometer</div><div class="row-value">${esc(fmtDist(num(r.nextOdo)))}</div></div>` : ''}</div>` : ''}
+        ${num(r.nextOdo) != null ? `<div class="row"><div class="row-main">Odometer</div><div class="row-value">${esc(fmtDist(num(r.nextOdo)))}</div></div>` : ''}
+        <div class="row"><div class="row-main">Reminder</div><div class="row-value">${newer ? `Replaced by ${esc(fmtDate(newer.date))}` : '<span style="color:var(--green)">Active</span>'}</div></div></div>
+        ${newer && !hasReminder(newer) ? `<button class="btn tinted" style="margin-top:10px" data-act="move">${icon('bell')}Move Reminder to Newer Record</button>` : ''}` : ''}
     ${r.notes ? `<div class="section-h">Notes</div><div class="group"><div class="notes">${esc(r.notes)}</div></div>` : ''}
     ${docs.length ? `<div class="section-h">Documents</div><div class="group"><div class="attach-grid">${docs.map(d => `<button class="doc-tile" data-action="open-doc" data-id="${d.id}">${thumbHTML(d)}</button>`).join('')}</div></div>` : ''}
     <button class="btn tinted" data-act="again">${icon('plus')}Log Again</button>`;
   const sh = openSheet({ title: '', body, left: 'Close', right: 'Edit', dismissable: true, onRight: close => { close(); setTimeout(() => openRecordForm(r), 200); } });
-  sh.body.addEventListener('click', e => {
+  sh.body.addEventListener('click', async e => {
     if (e.target.closest('[data-act="again"]')) {
       sh.close();
       setTimeout(() => openRecordForm(null, { vehicleId: r.vehicleId, type: r.type, title: r.title, workshop: r.workshop }), 200);
+    }
+    if (e.target.closest('[data-act="move"]')) {
+      newer.nextDate = r.nextDate; newer.nextOdo = r.nextOdo; r.nextDate = ''; r.nextOdo = '';
+      await DB.put('records', newer); await DB.put('records', r);
+      sh.close(); render(); toast('Reminder moved');
     }
   });
 }
 
 /* =========================================================
+   Trips
+   ========================================================= */
+function expenseRowHTML(e = {}) {
+  const cat = e.cat || 'fuel';
+  return `<div class="part-row exp-row" data-id="${esc(e.id || uid())}" data-date="${esc(e.date || '')}"><button type="button" class="minus" data-act="rm-exp" aria-label="Remove">−</button>
+    <div class="part-fields">
+      <div class="exp-line"><select class="e-cat">${optionsHTML(expOptions(), cat)}</select><input class="e-amt" inputmode="decimal" placeholder="Amount" value="${esc(e.amount ?? '')}"></div>
+      <div class="exp-line"><input class="e-desc" placeholder="Where / what" value="${esc(e.desc || '')}"><input class="e-l" inputmode="decimal" placeholder="Litres" value="${esc(e.litres ?? '')}" ${cat === 'fuel' ? '' : 'hidden'}></div>
+    </div></div>`;
+}
+
+function newTrip(preset = {}) {
+  const v = curVehicle();
+  return {
+    id: uid(), created: Date.now(), vehicleId: v.id, name: '', purpose: 'Leisure', from: '', to: '',
+    startDate: todayISO(), endDate: '', odoStart: vehicleOdo(v) || '', odoEnd: '', completed: false, expenses: [], notes: '', ...preset,
+  };
+}
+
+function openTripForm(existing = null) {
+  const isNew = !existing;
+  const t = existing ? JSON.parse(JSON.stringify(existing)) : newTrip();
+  const places = [...new Set(S.trips.flatMap(x => [x.from, x.to]).filter(Boolean))];
+  const body = `<form autocomplete="off">
+    <div class="group">
+      ${S.vehicles.length > 1 ? selectField('Vehicle', 'vehicleId', vehicleOptions(), t.vehicleId) : ''}
+      ${inputField('Trip name', 'name', t.name, { ph: 'e.g. Joburg to Durban' })}
+      ${selectField('Purpose', 'purpose', PURPOSES.map(p => [p, p]), t.purpose)}
+    </div>
+    <div class="section-h">Route</div>
+    <div class="group">
+      ${inputField('From', 'from', t.from, { ph: 'e.g. Johannesburg', attrs: 'list="dl-places"' })}
+      ${inputField('To', 'to', t.to, { ph: 'e.g. Durban', attrs: 'list="dl-places"' })}
+    </div>
+    <datalist id="dl-places">${places.map(p => `<option value="${esc(p)}">`).join('')}</datalist>
+    <div class="section-h">Dates &amp; Odometer</div>
+    <div class="group">
+      ${inputField('Start date', 'startDate', t.startDate, { type: 'date' })}
+      ${inputField('End date', 'endDate', t.endDate, { type: 'date' })}
+      ${inputField('Odometer start', 'odoStart', t.odoStart, { mode: 'numeric', ph: '0', unit: S.settings.unit })}
+      ${inputField('Odometer end', 'odoEnd', t.odoEnd, { mode: 'numeric', ph: 'When you get back', unit: S.settings.unit })}
+      <div class="field"><label>Trip completed</label><input type="checkbox" class="switch" name="completed" ${t.completed ? 'checked' : ''}></div>
+    </div>
+    <div class="section-f" id="trip-dist"></div>
+
+    <div class="section-h">Expenses</div>
+    <div class="group" id="exps">${(t.expenses || []).map(expenseRowHTML).join('')}<button type="button" class="row tap link" data-act="add-exp">${icon('plus')}Add Expense</button></div>
+    <div class="section-f" id="exp-sum"></div>
+
+    <div class="section-h">Notes</div>
+    <div class="group"><div class="field"><textarea name="notes" placeholder="Passengers, route, stops, road conditions…">${esc(t.notes || '')}</textarea></div></div>
+
+    <div class="section-h">Receipts</div>
+    <div class="group"><div class="attach-grid"></div>${attachRows}</div>
+    ${isNew ? '' : '<button type="button" class="btn danger" data-act="delete">Delete Trip</button>'}
+  </form>`;
+
+  const sh = openSheet({ title: isNew ? 'New Trip' : 'Edit Trip', body, right: isNew ? 'Start' : 'Save', onRight: save });
+  const form = $('form', sh.body);
+  const F = n => form.elements[n];
+  const att = attachments(sh.body, S.docs.filter(d => d.tripId === t.id));
+
+  const readExpenses = () => $$('.exp-row', form).map(row => ({
+    id: row.dataset.id, date: row.dataset.date || '',
+    cat: $('.e-cat', row).value, amount: num($('.e-amt', row).value), desc: $('.e-desc', row).value.trim(),
+    litres: $('.e-cat', row).value === 'fuel' ? num($('.e-l', row).value) : null,
+  })).filter(e => e.amount != null || e.desc);
+  const refresh = () => {
+    const a = num(F('odoStart').value), b = num(F('odoEnd').value);
+    $('#trip-dist', sh.body).textContent = a != null && b != null ? (b >= a ? `Distance ${fmtDist(b - a)}` : 'End odometer is lower than start.') : '';
+    const ex = readExpenses();
+    $('#exp-sum', sh.body).textContent = ex.length ? `${ex.length} expense${ex.length === 1 ? '' : 's'} · Total ${fmtMoney(sum(ex, e => e.amount))}` : '';
+    sh.el.querySelector('.sh-right').textContent = isNew ? (F('completed').checked ? 'Add' : 'Start') : 'Save';
+  };
+  refresh();
+
+  form.addEventListener('input', e => {
+    if (e.target.name === 'odoEnd' && num(e.target.value) != null) F('completed').checked = true;
+    refresh();
+  });
+  form.addEventListener('change', e => {
+    if (e.target.classList.contains('e-cat')) $('.e-l', e.target.closest('.exp-row')).hidden = e.target.value !== 'fuel';
+    if (e.target.name === 'vehicleId' && isNew) F('odoStart').value = vehicleOdo(vehicleById(e.target.value)) || '';
+    refresh();
+  });
+  sh.body.addEventListener('click', async e => {
+    const el = e.target.closest('[data-act]');
+    if (!el) return;
+    if (el.dataset.act === 'add-exp') { el.insertAdjacentHTML('beforebegin', expenseRowHTML({ date: F('completed').checked ? F('startDate').value : todayISO() })); el.previousElementSibling.querySelector('.e-amt').focus(); }
+    if (el.dataset.act === 'rm-exp') { el.closest('.exp-row').remove(); refresh(); }
+    if (el.dataset.act === 'delete') {
+      const n = S.docs.filter(d => d.tripId === t.id).length;
+      if (!await confirmDestructive('Delete this trip?', `All its expenses${n ? ` and ${n} receipt${n === 1 ? '' : 's'}` : ''} will be deleted.`, 'Delete Trip')) return;
+      await deleteTrip(t.id);
+      sh.close(); $$('.sheet-wrap').forEach(s => s.remove()); lockScroll(); render(); toast('Trip deleted');
+    }
+  });
+
+  async function save(close) {
+    const f = Object.fromEntries(new FormData(form));
+    if (!f.startDate) { toast('Please choose a start date', false); return; }
+    const odoStart = num(f.odoStart), odoEnd = num(f.odoEnd);
+    if (odoStart != null && odoEnd != null && odoEnd < odoStart) { toast('End odometer is lower than start', false); return; }
+    if (f.endDate && f.endDate < f.startDate) { toast('End date is before start date', false); return; }
+    const completed = !!f.completed;
+    const out = {
+      ...t, vehicleId: f.vehicleId || t.vehicleId, name: f.name.trim(), purpose: f.purpose, from: f.from.trim(), to: f.to.trim(),
+      startDate: f.startDate, endDate: f.endDate || (completed ? f.startDate : ''), odoStart: odoStart ?? '', odoEnd: odoEnd ?? '',
+      completed, expenses: readExpenses().map(e => ({ ...e, date: e.date || f.startDate })), notes: f.notes.trim(), updated: Date.now(),
+    };
+    await saveTrip(out);
+    await att.commit({ vehicleId: out.vehicleId, tripId: out.id, baseName: `${tripName(out)} – Receipt`, category: 'Receipt', date: out.startDate });
+    close(); render(); toast(isNew ? (completed ? 'Trip added' : 'Trip started — drive safe') : 'Saved');
+  }
+}
+
+async function saveTrip(t) {
+  await DB.put('trips', t);
+  const i = S.trips.findIndex(x => x.id === t.id);
+  if (i >= 0) S.trips[i] = t; else S.trips.push(t);
+  sortTrips();
+}
+async function deleteTrip(id) {
+  for (const d of S.docs.filter(d => d.tripId === id)) await DB.del('docs', d.id);
+  await DB.del('trips', id);
+  S.docs = S.docs.filter(d => d.tripId !== id);
+  S.trips = S.trips.filter(t => t.id !== id);
+}
+
+function openExpenseSheet(tripId, expId = null, cat = 'fuel', onSaved) {
+  const trip = S.trips.find(x => x.id === tripId);
+  const exp = expId ? trip.expenses.find(e => e.id === expId) : null;
+  const isNew = !exp;
+  const e = exp ? { ...exp } : { id: uid(), cat, amount: '', desc: '', litres: '', date: trip.completed ? trip.startDate : todayISO() };
+  const descsFor = c => [...new Set(S.trips.flatMap(x => x.expenses || []).filter(x => x.cat === c && x.desc).map(x => x.desc))];
+  const body = `<form autocomplete="off">
+    <div class="group">
+      ${selectField('Category', 'cat', expOptions(), e.cat)}
+      ${inputField('Amount', 'amount', e.amount, { mode: 'decimal', ph: '0.00', unit: S.settings.currency })}
+      ${inputField('Where / what', 'desc', e.desc, { ph: EXP[e.cat].ph, attrs: 'list="dl-desc"' })}
+      <div class="field" id="litres-field" ${e.cat === 'fuel' ? '' : 'hidden'}><label>Litres</label><input name="litres" inputmode="decimal" placeholder="Optional" value="${esc(e.litres ?? '')}"><span class="unit">L</span></div>
+      ${inputField('Date', 'date', e.date, { type: 'date' })}
+    </div>
+    <datalist id="dl-desc">${descsFor(e.cat).map(d => `<option value="${esc(d)}">`).join('')}</datalist>
+    <div class="section-f" id="ppl"></div>
+    <div class="section-h">Receipt</div>
+    <div class="group"><div class="attach-grid"></div>${attachRows}</div>
+    ${isNew ? '' : '<button type="button" class="btn danger" data-act="del-exp">Delete Expense</button>'}
+  </form>`;
+  const sh = openSheet({ title: isNew ? 'Add Expense' : 'Edit Expense', body, right: isNew ? 'Add' : 'Save', onRight: save });
+  const form = $('form', sh.body);
+  const F = n => form.elements[n];
+  const att = attachments(sh.body, S.docs.filter(d => d.tripId === trip.id && d.expenseId === e.id));
+  const ppl = () => {
+    const a = num(F('amount').value), l = num(F('litres').value);
+    $('#ppl', sh.body).textContent = F('cat').value === 'fuel' && a && l ? `${fmtMoney(a / l)} per litre` : '';
+  };
+  form.addEventListener('input', ppl);
+  form.addEventListener('change', ev => {
+    if (ev.target.name !== 'cat') return;
+    const c = ev.target.value;
+    $('#litres-field', sh.body).hidden = c !== 'fuel';
+    F('desc').placeholder = EXP[c].ph;
+    $('#dl-desc', sh.body).innerHTML = descsFor(c).map(d => `<option value="${esc(d)}">`).join('');
+    ppl();
+  });
+  sh.body.addEventListener('click', async ev => {
+    if (!ev.target.closest('[data-act="del-exp"]')) return;
+    if (!await confirmDestructive('Delete this expense?', '', 'Delete Expense')) return;
+    trip.expenses = trip.expenses.filter(x => x.id !== e.id);
+    for (const d of S.docs.filter(d => d.expenseId === e.id)) { await DB.del('docs', d.id); }
+    S.docs = S.docs.filter(d => d.expenseId !== e.id);
+    await saveTrip(trip);
+    sh.close(); render(); onSaved?.(); toast('Expense deleted');
+  });
+  setTimeout(() => { if (isNew) F('amount').focus(); }, 450);
+
+  async function save(close) {
+    const f = Object.fromEntries(new FormData(form));
+    const amount = num(f.amount);
+    if (amount == null) { toast('Enter an amount', false); F('amount').focus(); return; }
+    const out = { ...e, cat: f.cat, amount, desc: f.desc.trim(), litres: f.cat === 'fuel' ? num(f.litres) : null, date: f.date || todayISO() };
+    trip.expenses = trip.expenses || [];
+    const i = trip.expenses.findIndex(x => x.id === out.id);
+    if (i >= 0) trip.expenses[i] = out; else trip.expenses.push(out);
+    trip.updated = Date.now();
+    await saveTrip(trip);
+    await att.commit({ vehicleId: trip.vehicleId, tripId: trip.id, baseName: `${EXP[out.cat].label}${out.desc ? ` – ${out.desc}` : ''}`, category: 'Receipt', date: out.date, extra: { expenseId: out.id } });
+    close(); render(); onSaved?.(); toast(`${EXP[out.cat].short} ${fmtMoneyShort(amount)} added`);
+  }
+}
+
+function openEndTripSheet(tripId, onSaved) {
+  const t = S.trips.find(x => x.id === tripId);
+  const sh = openSheet({
+    title: 'End Trip', small: true, dismissable: true, right: 'Done',
+    body: `<div class="group" style="margin-top:8px">
+        ${inputField('End date', 'endDate', todayISO(), { type: 'date' })}
+        ${inputField('Odometer', 'odoEnd', '', { mode: 'numeric', ph: num(t.odoStart) ? `Started at ${fmtNum(num(t.odoStart))}` : 'Reading now', unit: S.settings.unit })}
+      </div><div class="section-f" id="end-dist">Enter the odometer reading to work out the distance.</div>`,
+    onRight: async close => {
+      const odoEnd = num($('[name=odoEnd]', sh.body).value);
+      const endDate = $('[name=endDate]', sh.body).value || todayISO();
+      if (odoEnd != null && num(t.odoStart) != null && odoEnd < num(t.odoStart)) { toast('Lower than the start reading', false); return; }
+      Object.assign(t, { endDate, odoEnd: odoEnd ?? '', completed: true, updated: Date.now() });
+      await saveTrip(t);
+      close(); render(); onSaved?.();
+      const d = tripDist(t);
+      toast(d != null ? `Trip done · ${fmtDist(d)} · ${fmtMoneyShort(tripTotal(t))}` : 'Trip completed');
+    },
+  });
+  $('[name=odoEnd]', sh.body).addEventListener('input', ev => {
+    const n = num(ev.target.value), s = num(t.odoStart);
+    $('#end-dist', sh.body).textContent = n != null && s != null ? (n >= s ? `Distance ${fmtDist(n - s)}` : 'Lower than the start reading') : 'Enter the odometer reading to work out the distance.';
+  });
+  setTimeout(() => $('[name=odoEnd]', sh.body)?.focus(), 450);
+}
+
+function openTripDetail(id) {
+  const sh = openSheet({
+    title: '', left: 'Close', right: 'Edit', dismissable: true,
+    onRight: close => { const t = S.trips.find(x => x.id === id); close(); setTimeout(() => openTripForm(t), 200); },
+  });
+  const paint = () => {
+    const t = S.trips.find(x => x.id === id);
+    if (!t) { sh.close(); return; }
+    const dist = tripDist(t);
+    const total = tripTotal(t);
+    const litres = tripLitres(t);
+    const fuelCost = sum((t.expenses || []).filter(e => e.cat === 'fuel' && num(e.litres)), e => num(e.amount));
+    const v = vehicleById(t.vehicleId);
+    const docs = S.docs.filter(d => d.tripId === t.id);
+    const exps = [...(t.expenses || [])].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+    const cats = {};
+    exps.forEach(e => { cats[e.cat] = (cats[e.cat] || 0) + (num(e.amount) || 0); });
+    const catRows = Object.entries(cats).sort((a, b) => b[1] - a[1]);
+    const unit = S.settings.unit;
+    const consumption = litres && dist ? (unit === 'km' ? `${(litres / dist * 100).toFixed(1)} L/100km` : `${(dist / litres).toFixed(1)} mi/L`) : '—';
+    const days = tripDays(t);
+
+    sh.body.innerHTML = `
+      <div class="detail-head"><div class="big-icon" style="background:${t.completed ? COLORS.blue : COLORS.green}">${icon('route')}</div>
+        <h2>${esc(tripName(t))}</h2>
+        <p>${esc([t.from && t.to && t.name ? `${t.from} → ${t.to}` : '', fmtDate(t.startDate) + (t.endDate && t.endDate !== t.startDate ? ` – ${fmtDate(t.endDate)}` : ''), days > 1 ? `${days} days` : ''].filter(Boolean).join(' · '))}</p>
+        <p>${esc([v?.name, t.purpose].filter(Boolean).join(' · '))}${t.completed ? '' : ' · <span class="live-tag">In progress</span>'}</p></div>
+      <div class="stat-grid" style="margin-top:16px">
+        <div><b>${dist != null ? fmtNum(dist) : '—'}</b><span>${esc(unit)}</span></div>
+        <div><b>${fmtMoneyShort(total)}</b><span>Total spent</span></div>
+        <div><b>${dist && total ? `${esc(S.settings.currency)} ${(total / dist).toFixed(2)}` : '—'}</b><span>Per ${esc(unit)}</span></div>
+      </div>
+      ${litres ? `<div class="stat-grid" style="margin-top:8px">
+        <div><b>${litres.toFixed(1)} L</b><span>Fuel</span></div>
+        <div><b>${consumption}</b><span>Consumption ≈</span></div>
+        <div><b>${fuelCost ? `${esc(S.settings.currency)} ${(fuelCost / litres).toFixed(2)}` : '—'}</b><span>Avg per litre</span></div>
+      </div>` : ''}
+      ${t.completed ? '' : `<div class="chips" style="margin-top:16px">${['fuel', 'toll', 'food', 'drinks', 'accom', 'other'].map(c => `<button class="chip" data-act="exp-add" data-cat="${c}">${icon(EXP[c].icon)}${EXP[c].short}</button>`).join('')}</div>
+        <button class="btn" style="margin-top:12px" data-act="end">${icon('flag')}End Trip</button>`}
+      ${catRows.length ? `<div class="section-h">Breakdown</div><div class="group">${catRows.map(([c, amt]) => `<div class="row has-icon">${expIcon(c)}
+          <div class="row-main"><div class="row-title">${esc(EXP[c]?.label || c)}</div><div class="bar"><i style="width:${Math.max(2, amt / total * 100).toFixed(1)}%;background:${COLORS[(EXP[c] || EXP.other).color]}"></i></div></div>
+          <div class="row-value sm">${fmtMoneyShort(amt)}</div></div>`).join('')}</div>` : ''}
+      <div class="section-h">Expenses</div>
+      <div class="group">${exps.map(e => `<button class="row tap has-icon" data-act="exp-edit" data-id="${e.id}">${expIcon(e.cat)}
+          <div class="row-main"><div class="row-title">${esc(e.desc || EXP[e.cat]?.label)}</div><div class="row-sub">${esc([fmtDate(e.date), e.desc ? EXP[e.cat]?.label : '', num(e.litres) ? `${num(e.litres)} L` : ''].filter(Boolean).join(' · '))}${S.docs.some(d => d.expenseId === e.id) ? ` · ${icon('clip')}` : ''}</div></div>
+          <div class="row-value sm">${fmtMoney(num(e.amount))}</div>${icon('chev', 'chev')}</button>`).join('')}
+        <button class="row tap link" data-act="exp-add" data-cat="fuel">${icon('plus')}Add Expense</button></div>
+      ${num(t.odoStart) || num(t.odoEnd) ? `<div class="section-h">Odometer</div><div class="group">
+        <div class="row"><div class="row-main">Start</div><div class="row-value">${num(t.odoStart) ? fmtDist(num(t.odoStart)) : '—'}</div></div>
+        <div class="row"><div class="row-main">End</div><div class="row-value">${num(t.odoEnd) ? fmtDist(num(t.odoEnd)) : '—'}</div></div></div>` : ''}
+      ${t.notes ? `<div class="section-h">Notes</div><div class="group"><div class="notes">${esc(t.notes)}</div></div>` : ''}
+      ${docs.length ? `<div class="section-h">Receipts</div><div class="group"><div class="attach-grid">${docs.map(d => `<button class="doc-tile" data-action="open-doc" data-id="${d.id}">${thumbHTML(d)}</button>`).join('')}</div></div>` : ''}`;
+  };
+  paint();
+  sh.body.addEventListener('click', e => {
+    const el = e.target.closest('[data-act]');
+    if (!el) return;
+    if (el.dataset.act === 'exp-add') openExpenseSheet(id, null, el.dataset.cat, paint);
+    if (el.dataset.act === 'exp-edit') openExpenseSheet(id, el.dataset.id, null, paint);
+    if (el.dataset.act === 'end') openEndTripSheet(id, paint);
+  });
+}
+
+function tripQuick() {
+  if (!S.vehicles.length) return openVehicleForm();
+  const live = activeTrips(curVehicle().id);
+  if (live.length) openTripDetail(live[0].id); else openTripForm();
+}
+
+async function exportTripsCSV() {
+  const v = curVehicle();
+  const trips = filteredTrips().slice().reverse();
+  if (!trips.length) return toast('No trips to export', false);
+  const q = s => `"${String(s ?? '').replace(/"/g, '""')}"`;
+  const catSum = (t, c) => sum((t.expenses || []).filter(e => e.cat === c), e => num(e.amount));
+  const head = ['Start date', 'End date', 'Vehicle', 'Registration', 'Trip', 'Purpose', 'From', 'To', `Odometer start (${S.settings.unit})`, `Odometer end (${S.settings.unit})`, `Distance (${S.settings.unit})`,
+    'Fuel litres', ...Object.values(EXP).map(c => c.label), 'Total', 'Notes'];
+  const rows = trips.map(t => [t.startDate, t.endDate, v.name, v.reg, tripName(t), t.purpose, t.from, t.to, num(t.odoStart) ?? '', num(t.odoEnd) ?? '', tripDist(t) ?? '',
+    tripLitres(t) || '', ...Object.keys(EXP).map(c => catSum(t, c) ? catSum(t, c).toFixed(2) : ''), tripTotal(t).toFixed(2), t.notes]);
+  const csv = '﻿' + [head, ...rows].map(r => r.map(q).join(',')).join('\r\n');
+  const name = `trip-logbook-${v.name.replace(/\W+/g, '-').toLowerCase()}-${todayISO()}.csv`;
+  await shareOrDownload(new File([csv], name, { type: 'text/csv' }), 'Trip Logbook');
+}
+
+async function shareOrDownload(file, title) {
+  if (navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file], title }); return; } catch (e) { if (e.name === 'AbortError') return; }
+  }
+  const url = URL.createObjectURL(file);
+  const a = document.createElement('a'); a.href = url; a.download = file.name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  toast('Saved');
+}
+
+/* =========================================================
    Documents
    ========================================================= */
-function recordOptionsFor(vehicleId) {
-  return [['', 'None'], ...vehicleRecords(vehicleId).map(r => [r.id, `${fmtDate(r.date)} · ${recTitle(r)}`])];
+function linkSelectField(vehicleId, value) {
+  const recs = vehicleRecords(vehicleId), trips = vehicleTrips(vehicleId);
+  return `<div class="field"><label>Link to</label><select name="link">
+    <option value="">Nothing</option>
+    ${recs.length ? `<optgroup label="Service & Repairs">${recs.map(r => `<option value="r:${r.id}" ${value === 'r:' + r.id ? 'selected' : ''}>${esc(fmtDate(r.date))} · ${esc(recTitle(r))}</option>`).join('')}</optgroup>` : ''}
+    ${trips.length ? `<optgroup label="Trips">${trips.map(t => `<option value="t:${t.id}" ${value === 't:' + t.id ? 'selected' : ''}>${esc(fmtDate(t.startDate))} · ${esc(tripName(t))}</option>`).join('')}</optgroup>` : ''}
+  </select>${icon('updown', 'updown')}</div>`;
 }
 
 function openDocForm({ doc = null, files = [] }) {
   const isNew = !doc;
-  const d = doc || { vehicleId: curVehicle().id, recordId: '', name: '', category: 'Invoice', date: todayISO() };
+  const d = doc || { vehicleId: curVehicle().id, recordId: '', tripId: '', name: '', category: 'Invoice', date: todayISO() };
+  const link = d.recordId ? 'r:' + d.recordId : d.tripId ? 't:' + d.tripId : '';
   const previews = isNew ? files : [doc];
   const body = `<form autocomplete="off">
     <div class="attach-grid" style="padding:8px 0 4px">${previews.map(p => `<div class="att">${thumbHTML(p)}</div>`).join('')}</div>
@@ -777,26 +1367,29 @@ function openDocForm({ doc = null, files = [] }) {
       ${selectField('Category', 'category', DOC_CATS.map(c => [c, c]), d.category)}
       ${inputField('Date', 'date', d.date, { type: 'date' })}
     </div>
-    <div class="section-h">Link to</div>
-    <div class="group">
+    <div class="section-h">Link</div>
+    <div class="group" id="link-group">
       ${S.vehicles.length > 1 ? selectField('Vehicle', 'vehicleId', vehicleOptions(), d.vehicleId) : ''}
-      ${selectField('Record', 'recordId', recordOptionsFor(d.vehicleId), d.recordId || '')}
+      ${linkSelectField(d.vehicleId, link)}
     </div>
-    <div class="section-f">Linking a document to a service or repair keeps the invoice with that record.</div>
+    <div class="section-f">Linking keeps the invoice or receipt with that service, repair or trip.</div>
   </form>`;
   const sh = openSheet({
     title: isNew ? (files.length > 1 ? `${files.length} Documents` : 'New Document') : 'Document Details', body, right: 'Save',
     onRight: async close => {
       const f = Object.fromEntries(new FormData($('form', sh.body)));
       const vehicleId = f.vehicleId || d.vehicleId;
+      const recordId = f.link?.startsWith('r:') ? f.link.slice(2) : null;
+      const tripId = f.link?.startsWith('t:') ? f.link.slice(2) : null;
       if (isNew) {
         const base = f.name.trim() || files[0]?.name || f.category;
         for (const [i, p] of files.entries()) {
-          const nd = { id: uid(), created: Date.now() + i, vehicleId, recordId: f.recordId || null, name: files.length > 1 ? `${base} ${i + 1}` : base, category: f.category, date: f.date || todayISO(), mime: p.mime, blob: p.blob, thumb: p.thumb, size: p.size };
+          const nd = { id: uid(), created: Date.now() + i, vehicleId, recordId, tripId, name: files.length > 1 ? `${base} ${i + 1}` : base, category: f.category, date: f.date || todayISO(), mime: p.mime, blob: p.blob, thumb: p.thumb, size: p.size };
           await DB.put('docs', nd); S.docs.push(nd);
         }
       } else {
-        Object.assign(doc, { name: f.name.trim() || doc.name, category: f.category, date: f.date || doc.date, vehicleId, recordId: f.recordId || null });
+        if (tripId !== doc.tripId) delete doc.expenseId;
+        Object.assign(doc, { name: f.name.trim() || doc.name, category: f.category, date: f.date || doc.date, vehicleId, recordId, tripId });
         await DB.put('docs', doc);
       }
       sortDocs(); close(); render(); toast('Saved');
@@ -804,7 +1397,7 @@ function openDocForm({ doc = null, files = [] }) {
   });
   const vSel = $('[name=vehicleId]', sh.body);
   if (vSel) vSel.addEventListener('change', () => {
-    $('[name=recordId]', sh.body).innerHTML = recordOptionsFor(vSel.value).map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('');
+    $('[name=link]', sh.body).closest('.field').outerHTML = linkSelectField(vSel.value, '');
   });
 }
 
@@ -827,6 +1420,7 @@ function openViewer(id) {
   if (!d) return;
   const url = URL.createObjectURL(d.blob);
   const rec = d.recordId && S.records.find(r => r.id === d.recordId);
+  const trip = d.tripId && S.trips.find(t => t.id === d.tripId);
   const isImg = (d.mime || '').startsWith('image/');
   const w = document.createElement('div');
   w.className = 'viewer-wrap';
@@ -835,7 +1429,7 @@ function openViewer(id) {
       <div class="v-title"><div>${esc(d.name)}</div><small>${esc(d.category)} · ${esc(fmtDate(d.date))}${d.size ? ` · ${fmtBytes(d.size)}` : ''}</small></div>
       <button data-v="share" aria-label="Share">${icon('share')}</button></div>
     <div class="v-body">${isImg ? `<img src="${url}" alt="${esc(d.name)}">` : `<div class="pdf-card">${icon('doc')}<div>${esc(d.name)}</div><a class="btn inline" href="${url}" target="_blank" rel="noopener">Open Document</a></div>`}</div>
-    <div class="v-bottom">${rec ? `<button data-v="rec" class="v-link">${icon('clip')}${esc(recTitle(rec))}</button>` : '<span></span>'}
+    <div class="v-bottom">${rec ? `<button data-v="rec" class="v-link">${icon('clip')}${esc(recTitle(rec))}</button>` : trip ? `<button data-v="trip" class="v-link">${icon('route')}${esc(tripName(trip))}</button>` : '<span></span>'}
       <div class="v-actions"><button data-v="edit">Details</button><button data-v="del" class="red" aria-label="Delete">${icon('trash')}</button></div></div>`;
   $('#overlay').appendChild(w);
   lockScroll();
@@ -848,12 +1442,13 @@ function openViewer(id) {
     if (a === 'close') close();
     if (a === 'share') {
       const ext = isImg ? 'jpg' : (d.mime.split('/')[1] || 'bin');
-      const file = new File([d.blob], `${d.name}.${ext}`, { type: d.mime });
-      if (navigator.canShare?.({ files: [file] })) { try { await navigator.share({ files: [file], title: d.name }); } catch { /* cancelled */ } }
-      else { const a2 = document.createElement('a'); a2.href = url; a2.download = file.name; a2.click(); }
+      await shareOrDownload(new File([d.blob], `${d.name}.${ext}`, { type: d.mime }), d.name);
     }
     if (a === 'edit') { close(); setTimeout(() => openDocForm({ doc: d }), 200); }
-    if (a === 'rec') { close(); $$('.sheet-wrap').forEach(s => s.remove()); setTimeout(() => openRecordDetail(rec.id), 200); }
+    if (a === 'rec' || a === 'trip') {
+      close(); $$('.sheet-wrap').forEach(s => s.remove());
+      setTimeout(() => a === 'rec' ? openRecordDetail(rec.id) : openTripDetail(trip.id), 200);
+    }
     if (a === 'del') {
       if (!await confirmDestructive('Delete this document?', 'This cannot be undone.', 'Delete Document')) return;
       await DB.del('docs', d.id);
@@ -870,7 +1465,7 @@ function reminderMenu(id) {
   const r = S.records.find(x => x.id === id);
   actionSheet({
     title: recTitle(r),
-    message: [r.nextDate ? `Due ${fmtDate(r.nextDate)}` : '', num(r.nextOdo) ? `at ${fmtDist(num(r.nextOdo))}` : ''].filter(Boolean).join(' or '),
+    message: [r.nextDate ? `Due ${fmtDate(r.nextDate)}` : '', num(r.nextOdo) != null ? `at ${fmtDist(num(r.nextOdo))}` : ''].filter(Boolean).join(' or '),
     actions: [
       { label: 'Mark as Done…', handler: () => openRecordForm(null, { vehicleId: r.vehicleId, type: r.type, title: r.title, workshop: r.workshop }) },
       { label: 'View Last Record', handler: () => openRecordDetail(r.id) },
@@ -883,12 +1478,14 @@ function addMenu() {
   if (!S.vehicles.length) return openVehicleForm();
   const v = curVehicle();
   const t = type => () => openRecordForm(null, { type });
+  const live = activeTrips(v.id)[0];
   actionSheet({
     title: v.name, actions: [
       { label: 'Log Service', handler: t('service') },
       { label: 'Log Repair', handler: t('repair') },
       { label: 'Log Parts Replacement', handler: t('parts') },
       { label: 'Other Record…', handler: t('other') },
+      live ? { label: 'Add Trip Expense', handler: () => openExpenseSheet(live.id, null, 'fuel') } : { label: 'Start a Trip', handler: () => openTripForm() },
       { label: 'Scan Invoice / Document', handler: () => scanFlow() },
       { label: 'Update Odometer', handler: openOdoSheet },
     ],
@@ -902,17 +1499,10 @@ async function exportBackup() {
   toast('Preparing backup…', false);
   const docs = [];
   for (const d of S.docs) docs.push({ ...d, blob: await blobToDataURL(d.blob) });
-  const data = { app: 'garage-log', version: 1, exported: new Date().toISOString(), settings: S.settings, vehicles: S.vehicles, records: S.records, docs };
+  const data = { app: 'garage-log', version: 2, appVersion: APP_VERSION, exported: new Date().toISOString(), settings: S.settings, vehicles: S.vehicles, records: S.records, trips: S.trips, docs };
   const name = `garage-log-backup-${todayISO()}.json`;
-  const file = new File([JSON.stringify(data)], name, { type: 'application/json' });
   $('#toast').classList.remove('show');
-  if (navigator.canShare?.({ files: [file] })) {
-    try { await navigator.share({ files: [file], title: 'Garage Log Backup' }); return; } catch (e) { if (e.name === 'AbortError') return; }
-  }
-  const url = URL.createObjectURL(file);
-  const a = document.createElement('a'); a.href = url; a.download = name; a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
-  toast('Backup saved');
+  await shareOrDownload(new File([JSON.stringify(data)], name, { type: 'application/json' }), 'Garage Log Backup');
 }
 
 async function importBackup() {
@@ -921,25 +1511,63 @@ async function importBackup() {
   let data;
   try { data = JSON.parse(await file.text()); } catch { return toast('Not a valid backup file', false); }
   if (data.app !== 'garage-log') return toast('Not a Garage Log backup', false);
-  const ok = await confirmDestructive('Restore backup?', `Replaces everything on this device with ${data.vehicles.length} vehicles, ${data.records.length} records and ${data.docs.length} documents from ${fmtDate(data.exported.slice(0, 10))}.`, 'Replace & Restore');
+  const trips = data.trips || [];
+  const ok = await confirmDestructive('Restore backup?', `Replaces everything on this device with ${data.vehicles.length} vehicles, ${data.records.length} records, ${trips.length} trips and ${data.docs.length} documents from ${fmtDate(data.exported.slice(0, 10))}.`, 'Replace & Restore');
   if (!ok) return;
   toast('Restoring…', false);
   for (const s of STORES) await DB.clear(s);
   for (const v of data.vehicles) await DB.put('vehicles', v);
   for (const r of data.records) await DB.put('records', r);
+  for (const t of trips) await DB.put('trips', t);
   const docs = [];
   for (const d of data.docs) { const nd = { ...d, blob: await dataURLToBlob(d.blob) }; await DB.put('docs', nd); docs.push(nd); }
-  Object.assign(S.settings, data.settings || {});
+  Object.assign(S.settings, data.settings || {}, { seenVersion: APP_VERSION });
   await saveSettings();
-  S.vehicles = data.vehicles; S.records = data.records; S.docs = docs;
-  sortRecords(); sortDocs(); render(); toast('Backup restored');
+  S.vehicles = data.vehicles; S.records = data.records; S.trips = trips; S.docs = docs;
+  sortRecords(); sortDocs(); sortTrips(); render(); toast('Backup restored');
 }
 
 async function eraseAll() {
-  if (!await confirmDestructive('Erase all data?', 'Every vehicle, record and document on this device will be permanently deleted. Export a backup first if you might need it.', 'Erase Everything')) return;
+  if (!await confirmDestructive('Erase all data?', 'Every vehicle, record, trip and document on this device will be permanently deleted. Export a backup first if you might need it.', 'Erase Everything')) return;
   for (const s of STORES) await DB.clear(s);
-  S.vehicles = []; S.records = []; S.docs = []; S.settings.vehicleId = null;
+  S.vehicles = []; S.records = []; S.docs = []; S.trips = []; S.settings.vehicleId = null;
   render(); toast('All data erased');
+}
+
+/* =========================================================
+   Updates
+   ========================================================= */
+function openWhatsNew() {
+  openSheet({
+    title: `What's New in ${APP_VERSION}`, left: 'Done', dismissable: true,
+    body: `<div class="whats-new">${WHATS_NEW.map(([ic, t, d]) => `<div class="wn-item"><div class="wn-icon">${icon(ic)}</div><div><b>${esc(t)}</b><p>${esc(d)}</p></div></div>`).join('')}</div>
+      <div class="section-f" style="text-align:center">Your existing vehicles, records and documents were kept as they were.</div>`,
+  });
+}
+
+function showUpdateBanner(ver) {
+  if ($('#update-banner')) return;
+  const b = document.createElement('button');
+  b.id = 'update-banner';
+  b.innerHTML = `${icon('refresh')}<span>Update ${esc(ver)} ready — tap to install</span>`;
+  b.onclick = async () => {
+    b.querySelector('span').textContent = 'Updating…';
+    try { const reg = await navigator.serviceWorker?.getRegistration(); await reg?.update(); } catch { /* ignore */ }
+    location.reload();
+  };
+  document.body.appendChild(b);
+}
+
+async function checkForUpdate(manual = false) {
+  try {
+    const res = await fetch(`version.json?t=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error();
+    const { version } = await res.json();
+    if (version && version !== APP_VERSION) { showUpdateBanner(version); if (manual) toast(`Version ${version} is available`, false); return; }
+    if (manual) toast(`You're on the latest version (${APP_VERSION})`);
+  } catch {
+    if (manual) toast('Offline — could not check for updates', false);
+  }
 }
 
 /* =========================================================
@@ -953,13 +1581,22 @@ const ACTIONS = {
   'open-record': el => openRecordDetail(el.dataset.id),
   'reminder': el => reminderMenu(el.dataset.id),
   'odo': openOdoSheet,
+  'spending': openSpendingSheet,
   'scan': () => scanFlow(),
   'open-doc': el => openViewer(el.dataset.id),
   'add-vehicle': () => openVehicleForm(),
   'edit-vehicle': el => openVehicleForm(vehicleById(el.dataset.id)),
+  'new-trip': () => openTripForm(),
+  'trip-quick': tripQuick,
+  'open-trip': el => openTripDetail(el.dataset.id),
+  'trip-exp': el => openExpenseSheet(el.dataset.id, null, el.dataset.cat),
+  'end-trip': el => openEndTripSheet(el.dataset.id),
+  'export-trips': exportTripsCSV,
   'export': exportBackup,
   'import': importBackup,
   'erase': eraseAll,
+  'check-update': () => checkForUpdate(true),
+  'whats-new': openWhatsNew,
 };
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-action]');
@@ -970,6 +1607,8 @@ document.addEventListener('change', e => {
   const c = el.dataset.change;
   if (c === 'hist-type') { S.histType = el.value; render(); }
   if (c === 'doc-cat') { S.docCat = el.value; render(); }
+  if (c === 'trip-year') { S.tripYear = el.value; render(); }
+  if (c === 'trip-purpose') { S.tripPurpose = el.value; render(); }
   if (c === 'vehicle') { S.settings.vehicleId = el.value; saveSettings(); render(); }
   if (el.dataset.setting) {
     const k = el.dataset.setting;
@@ -980,6 +1619,7 @@ document.addEventListener('change', e => {
 document.addEventListener('input', e => {
   if (e.target.dataset.input === 'hist-search') { S.histQuery = e.target.value; $('#hist-list').innerHTML = historyList(); }
 });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkForUpdate(); });
 
 /* =========================================================
    Boot
@@ -987,18 +1627,25 @@ document.addEventListener('input', e => {
 (async function boot() {
   try {
     await openDB();
-    const [vehicles, records, docs, meta] = await Promise.all(STORES.map(s => DB.all(s)));
+    const [vehicles, records, docs, trips, meta] = await Promise.all(STORES.map(s => DB.all(s)));
     S.vehicles = vehicles.sort((a, b) => (a.created || 0) - (b.created || 0));
-    S.records = records; S.docs = docs;
+    S.records = records; S.docs = docs; S.trips = trips;
     const st = meta.find(m => m.id === 'settings');
     if (st) { delete st.id; Object.assign(S.settings, st); }
-    sortRecords(); sortDocs();
+    sortRecords(); sortDocs(); sortTrips();
   } catch (e) {
     console.error(e);
     $('#view').innerHTML = `<div class="empty"><h3>Storage unavailable</h3><p>${esc(e.message)}</p></div>`;
     return;
   }
   render();
+  if (S.settings.seenVersion !== APP_VERSION) {
+    const hadData = S.vehicles.length > 0;
+    S.settings.seenVersion = APP_VERSION;
+    saveSettings();
+    if (hadData) setTimeout(openWhatsNew, 600);
+  }
   navigator.storage?.persist?.();
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
+  checkForUpdate();
 })();
