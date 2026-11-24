@@ -191,6 +191,7 @@ body.scrolled .nav-title { opacity: 1; }
 .photo-tile:active { opacity: .7; }
 .cover-tag { position: absolute; left: 6px; bottom: 6px; font-size: 11px; font-weight: 600; color: #000; background: rgba(255,255,255,.9); border-radius: 6px; padding: 2px 6px; }
 .v-avatar { flex: none; width: 34px; height: 34px; border-radius: 17px; background: var(--bg3) center / cover no-repeat; border: 2px solid; }
+.call-btns { display: grid; gap: 8px; margin-top: 14px; }
 .v-cover { min-width: 0; }
 .v-cover .v-link { display: flex !important; max-width: none; align-items: center; gap: 6px; font-size: 17px; padding: 8px 0; color: var(--blue); }
 .v-cover .v-link.muted { color: var(--label2); }

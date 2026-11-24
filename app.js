@@ -3,8 +3,11 @@
    Garage Log — vehicle service, repair & trip tracker (PWA)
    All data lives on-device in IndexedDB.
    ========================================================= */
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const WHATS_NEW = [
+  ['shield', 'Insurance details', 'Each vehicle now has its own insurance profile: insurer, cover type, policy number, premium (monthly or annual), debit order day, start and renewal dates, insured value, excess, add-ons, claims and roadside numbers, notes and policy documents. Find it under Insurance on the Garage, or Settings → your vehicle.'],
+  ['bell', 'Renewal reminder', 'Add a renewal date and it shows in Upcoming, so you know when to review your premium.'],
+  ['phone', 'One-tap claims call', 'Save the claims and roadside numbers and they appear as call buttons at the top of the insurance screen.'],
   ['camera', 'Vehicle photos', 'Add photos of each vehicle: take one or choose several from your library. Tap the camera on the Garage card, or add them under Settings → your vehicle.'],
   ['star', 'Cover photo', 'Your chosen photo now sits at the top of the Garage card. Tap it to see all photos and pick a different cover. Photos are kept out of Documents and included in backups.'],
   ['bell', 'Reminders fixed', 'A reminder now stays in Upcoming until a later record actually covers it (done around or after the due date or km). Logging an unrelated service in between no longer hides it. Any reminder can also be set to “Show in Upcoming anyway”.'],
@@ -641,8 +644,16 @@ function viewGarage() {
     ['scan', '', 'camera', 'Scan', COLORS.purple],
   ].map(([a, t, ic, l, c]) => `<button data-action="${a}" data-type="${t}"><span class="qi" style="background:${c}2b;color:${c}">${icon(ic)}</span>${l}</button>`).join('');
 
+  const insRem = insuranceReminder(v);
+  if (insRem) {
+    const rank = { over: 0, soon: 1, ok: 2 };
+    const at = reminders.findIndex(x => rank[x.status] > rank[insRem.status] || (x.status === insRem.status && (x.days ?? 99999) > insRem.days));
+    reminders.splice(at < 0 ? reminders.length : at, 0, insRem);
+  }
   const remHTML = reminders.length
     ? `<div class="group">${reminders.map(x => {
+        if (x.ins) return `<button class="row tap has-icon" data-action="insurance">${typeIcon('insurance')}
+          <div class="row-main"><div class="row-title">Insurance renewal</div><div class="row-sub">${esc([x.ins.insurer, `Due ${fmtDate(x.ins.renewalDate)}`].filter(Boolean).join(' · '))}</div></div>${reminderBadge(x)}</button>`;
         const bits = [x.r.nextDate ? `Due ${fmtDate(x.r.nextDate)}` : '', num(x.r.nextOdo) != null ? `at ${fmtDist(num(x.r.nextOdo))}` : ''].filter(Boolean).join(' or ');
         return `<button class="row tap has-icon" data-action="reminder" data-id="${x.r.id}">${typeIcon(x.r.type)}
           <div class="row-main"><div class="row-title">${esc(recTitle(x.r))}</div><div class="row-sub">${esc(bits)}</div></div>${reminderBadge(x)}</button>`;
@@ -681,6 +692,7 @@ function viewGarage() {
     ${live.map(activeTripCard).join('')}
     <div class="quick">${quick}</div>
     <div class="section-title">Upcoming ${reminders.length ? `<span class="count">${reminders.length}</span>` : ''}</div>${remHTML}${hiddenHTML}
+    <div class="section-title">Insurance</div><div class="group">${insuranceSummaryRow(v)}</div>
     <div class="section-title">Recent Activity ${recs.length > 5 ? '<button data-action="tab" data-tab="history">See All</button>' : ''}</div>${recentHTML}`,
   };
 }
@@ -892,6 +904,7 @@ function openVehicleForm(v = null) {
       <button type="button" class="row tap link" data-act="att-camera">${icon('camera')}Take Photo</button>
       <button type="button" class="row tap link" data-act="att-file">${icon('image')}Choose from Library</button></div>
     <div class="section-f">The first photo becomes the cover on the Garage card. To change it, tap the photo on the Garage card.</div>
+    ${isNew ? '' : `<div class="section-h">Insurance</div><div class="group">${insuranceSummaryRow(v).replace('data-action="insurance"', 'type="button" data-act="insurance"')}</div>`}
     <div class="section-h">Details</div>
     <div class="group">
       ${inputField('Make', 'make', d.make, { ph: 'Toyota' })}
@@ -938,6 +951,10 @@ function openVehicleForm(v = null) {
   });
   const att = attachments(sh.body, isNew ? [] : vehiclePhotos(v.id), { imagesOnly: true });
   sh.body.addEventListener('click', async e => {
+    if (e.target.closest('[data-act="insurance"]')) {
+      const refresh = () => { const row = $('[data-act="insurance"]', sh.body); if (row) row.outerHTML = insuranceSummaryRow(v).replace('data-action="insurance"', 'type="button" data-act="insurance"'); };
+      return openInsuranceSheet(v.id, refresh);
+    }
     if (!e.target.closest('[data-act="delete"]')) return;
     const n = vehicleRecords(v.id).length, nt = vehicleTrips(v.id).length;
     if (!await confirmDestructive(`Delete ${v.name}?`, `This permanently removes the vehicle, its ${n} record${n === 1 ? '' : 's'}, ${nt} trip${nt === 1 ? '' : 's'} and all its documents.`, 'Delete Vehicle')) return;
@@ -952,6 +969,131 @@ function openVehicleForm(v = null) {
     if (S.settings.vehicleId === v.id) { S.settings.vehicleId = S.vehicles[0]?.id || null; saveSettings(); }
     sh.close(); render(); toast('Vehicle deleted');
   });
+}
+
+/* =========================================================
+   Insurance (stored on the vehicle as v.insurance)
+   ========================================================= */
+const INSURERS = ['Discovery Insure', 'OUTsurance', 'Santam', 'Hollard', 'King Price', 'MiWay', 'Old Mutual Insure', 'Momentum Insure', 'Budget Insurance', 'Dial Direct', 'First for Women', 'Auto & General', 'Naked Insurance', 'Pineapple', 'Absa Insurance', 'FNB Insurance', 'Standard Bank Insurance', 'Nedbank Insurance', 'Sasria'];
+const COVER_TYPES = [['comprehensive', 'Comprehensive'], ['tpft', 'Third Party, Fire & Theft'], ['tp', 'Third Party Only'], ['other', 'Other']];
+const coverLabel = k => (COVER_TYPES.find(([v]) => v === k) || [, ''])[1];
+const VALUE_BASIS = [['', '—'], ['retail', 'Retail value'], ['market', 'Market value'], ['trade', 'Trade value'], ['agreed', 'Agreed value']];
+const hasInsurance = v => !!(v.insurance && (v.insurance.insurer || v.insurance.policyNo || num(v.insurance.premium) != null));
+const insuranceDocs = vid => S.docs.filter(d => d.vehicleId === vid && d.insurance);
+function annualPremium(ins) {
+  const p = num(ins?.premium);
+  if (p == null) return null;
+  return ins.frequency === 'annual' ? p : p * 12;
+}
+function insuranceReminder(v) {
+  const ins = v.insurance;
+  if (!hasInsurance(v) || !ins.renewalDate) return null;
+  const days = daysUntil(ins.renewalDate);
+  const status = days < 0 ? 'over' : days <= S.settings.leadDays ? 'soon' : 'ok';
+  return { ins, days, dist: null, status };
+}
+const telHref = s => 'tel:' + String(s || '').replace(/[^\d+]/g, '');
+
+function openInsuranceSheet(vid = curVehicle().id, onSaved) {
+  const v = vehicleById(vid);
+  const ins = v.insurance || {};
+  const cur = S.settings.currency;
+  const ord = n => n + ((n % 100 >= 11 && n % 100 <= 13) ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th'));
+  const days = Array.from({ length: 31 }, (_, i) => [i + 1, `${ord(i + 1)} of the month`]);
+  const call = [
+    ins.claimsPhone ? `<a class="btn tinted" href="${telHref(ins.claimsPhone)}">${icon('phone')}Call Claims Line</a>` : '',
+    ins.roadsidePhone ? `<a class="btn tinted" href="${telHref(ins.roadsidePhone)}">${icon('phone')}Call Roadside Assist</a>` : '',
+  ].filter(Boolean).join('');
+  const body = `<form autocomplete="off">
+    ${call ? `<div class="call-btns">${call}</div>` : ''}
+    <div class="section-h">Policy</div>
+    <div class="group">
+      ${inputField('Insurer', 'insurer', ins.insurer, { ph: 'e.g. OUTsurance', attrs: 'list="dl-ins"' })}
+      ${selectField('Cover type', 'cover', COVER_TYPES, ins.cover || 'comprehensive')}
+      ${inputField('Policy no.', 'policyNo', ins.policyNo, { ph: 'Optional', attrs: 'autocapitalize="characters"' })}
+      ${inputField('Broker / agent', 'broker', ins.broker, { ph: 'Optional' })}
+    </div>
+    <datalist id="dl-ins">${INSURERS.map(n => `<option value="${esc(n)}">`).join('')}</datalist>
+    <div class="section-h">Premium</div>
+    <div class="group">
+      ${inputField('Premium', 'premium', ins.premium, { mode: 'decimal', ph: '0.00', unit: cur })}
+      ${selectField('Paid', 'frequency', [['monthly', 'Monthly'], ['annual', 'Annually']], ins.frequency || 'monthly')}
+      ${selectField('Debit order', 'debitDay', [['', '—'], ...days], ins.debitDay || '')}
+    </div>
+    <div class="section-f" id="ins-annual"></div>
+    <div class="section-h">Dates</div>
+    <div class="group">
+      ${inputField('Start date', 'startDate', ins.startDate, { type: 'date' })}
+      ${inputField('Renewal date', 'renewalDate', ins.renewalDate, { type: 'date' })}
+    </div>
+    <div class="section-f">The renewal date shows in Upcoming on the Garage, so you get a reminder to review your premium.</div>
+    <div class="section-h">Cover</div>
+    <div class="group">
+      ${inputField('Insured value', 'insuredValue', ins.insuredValue, { mode: 'decimal', ph: 'Optional', unit: cur })}
+      ${selectField('Value basis', 'valueBasis', VALUE_BASIS, ins.valueBasis || '')}
+      ${inputField('Basic excess', 'excess', ins.excess, { mode: 'decimal', ph: 'Optional', unit: cur })}
+    </div>
+    <div class="section-h">Add-ons</div>
+    <div class="group">
+      ${[['carHire', 'Car hire'], ['roadside', 'Roadside assistance'], ['tracker', 'Tracking device required'], ['shortfall', 'Credit shortfall'], ['glass', 'Windscreen & glass'], ['tyreRim', 'Tyre & rim cover']].map(([k, l]) =>
+        `<div class="field"><label>${l}</label><input type="checkbox" class="switch" name="${k}" ${ins[k] ? 'checked' : ''}></div>`).join('')}
+    </div>
+    <div class="section-h">Contacts</div>
+    <div class="group">
+      ${inputField('Claims line', 'claimsPhone', ins.claimsPhone, { type: 'tel', ph: 'Optional' })}
+      ${inputField('Roadside', 'roadsidePhone', ins.roadsidePhone, { type: 'tel', ph: 'Optional' })}
+    </div>
+    <div class="section-h">Policy Documents</div>
+    <div class="group"><div class="attach-grid"></div>${attachRows}</div>
+    <div class="section-h">Notes</div>
+    <div class="group"><div class="field"><textarea name="notes" placeholder="Drivers, parking conditions, claim history…">${esc(ins.notes || '')}</textarea></div></div>
+    ${hasInsurance(v) ? '<button type="button" class="btn danger" data-act="remove-ins">Remove Insurance Details</button>' : ''}
+  </form>`;
+  const sh = openSheet({
+    title: hasInsurance(v) ? 'Insurance' : 'Add Insurance', body, right: 'Save',
+    onRight: async close => {
+      const form = $('form', sh.body);
+      const f = Object.fromEntries(new FormData(form));
+      for (const el of $$('input[type=checkbox]', form)) f[el.name] = el.checked;
+      for (const k of ['premium', 'insuredValue', 'excess']) f[k] = num(f[k]) ?? '';
+      f.insurer = (f.insurer || '').trim();
+      if (!f.insurer && f.premium === '' && !f.policyNo) { toast('Enter at least the insurer or premium', false); $('[name=insurer]', sh.body).focus(); return; }
+      f.updated = Date.now();
+      v.insurance = f;
+      await att.commit({ vehicleId: v.id, baseName: `${f.insurer || 'Insurance'} policy`, category: 'Insurance', date: f.startDate || todayISO(), extra: { insurance: true } });
+      await DB.put('vehicles', v);
+      close(); render(); onSaved?.(); toast('Insurance saved');
+    },
+  });
+  const att = attachments(sh.body, insuranceDocs(v.id));
+  const showAnnual = () => {
+    const p = num($('[name=premium]', sh.body).value);
+    const fq = $('[name=frequency]', sh.body).value;
+    $('#ins-annual', sh.body).textContent = p == null ? '' : fq === 'annual' ? `About ${fmtMoneyShort(p / 12)} a month.` : `${fmtMoneyShort(p * 12)} a year.`;
+  };
+  showAnnual();
+  sh.body.addEventListener('input', showAnnual);
+  sh.body.addEventListener('change', showAnnual);
+  sh.body.addEventListener('click', async e => {
+    if (!e.target.closest('[data-act="remove-ins"]')) return;
+    if (!await confirmDestructive('Remove insurance details?', `Clears the policy details for ${v.name}. Policy documents stay in Documents.`, 'Remove Details')) return;
+    v.insurance = null;
+    await DB.put('vehicles', v);
+    sh.close(); render(); onSaved?.(); toast('Insurance details removed');
+  });
+}
+
+function insuranceSummaryRow(v) {
+  if (!hasInsurance(v)) return `<button class="row tap link" data-action="insurance">${icon('plus')}Add insurance details</button>`;
+  const ins = v.insurance;
+  const p = num(ins.premium);
+  const sub = [
+    coverLabel(ins.cover),
+    p != null ? `${fmtMoneyShort(p)}/${ins.frequency === 'annual' ? 'yr' : 'mo'}` : '',
+  ].filter(Boolean).join(' · ');
+  const sub2 = [ins.policyNo ? `Policy ${ins.policyNo}` : '', ins.renewalDate ? `Renews ${fmtDate(ins.renewalDate)}` : ''].filter(Boolean).join(' · ');
+  return `<button class="row tap has-icon" data-action="insurance">${typeIcon('insurance')}
+    <div class="row-main"><div class="row-title">${esc(ins.insurer || 'Insurance')}</div><div class="row-sub">${esc(sub)}</div>${sub2 ? `<div class="row-sub">${esc(sub2)}</div>` : ''}</div>${icon('chev', 'chev')}</button>`;
 }
 
 /* =========================================================
@@ -1727,6 +1869,7 @@ function addMenu() {
       live ? { label: 'Add Trip Expense', handler: () => openExpenseSheet(live.id, null, 'fuel') } : { label: 'Start a Trip', handler: () => openTripForm() },
       { label: 'Scan Invoice / Document', handler: () => scanFlow() },
       { label: 'Vehicle Photos', handler: () => openPhotos(v.id) },
+      { label: 'Insurance Details', handler: () => openInsuranceSheet(v.id) },
       { label: 'Update Odometer', handler: openOdoSheet },
     ],
   });
@@ -1826,6 +1969,7 @@ const ACTIONS = {
   'scan': () => scanFlow(),
   'open-doc': el => openViewer(el.dataset.id),
   'photos': () => openPhotos(),
+  'insurance': () => openInsuranceSheet(),
   'add-vehicle': () => openVehicleForm(),
   'edit-vehicle': el => openVehicleForm(vehicleById(el.dataset.id)),
   'new-trip': () => openTripForm(),
