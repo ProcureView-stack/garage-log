@@ -3,8 +3,9 @@
    Garage Log — vehicle service, repair & trip tracker (PWA)
    All data lives on-device in IndexedDB.
    ========================================================= */
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.2.1';
 const WHATS_NEW = [
+  ['bell', 'Reminders fixed', 'A reminder now stays in Upcoming until a later record actually covers it (done around or after the due date or km). Logging an unrelated service in between no longer hides it. Any reminder can also be set to “Show in Upcoming anyway”.'],
   ['gauge', 'Back-fill in any order', 'Old records never change your current odometer. Tap Update on the odometer to see every reading by date; any that don’t fit (an earlier date with a higher reading) are marked ⚠ so you can fix them.'],
   ['car', 'Odometer today vs at purchase', 'Vehicle details now keep “Odometer today” and “Odometer at purchase” separate, with the purchase reading dated on your purchase date.'],
   ['plus', 'Save & Add Another', 'Enter history faster: the next record opens with the same vehicle, type, workshop and date.'],
@@ -419,10 +420,49 @@ function attachments(sheetBody, existingDocs) {
 const sameKind = (a, b) => a.type === b.type && (RECURRING.has(a.type) || recTitle(a).toLowerCase() === recTitle(b).toLowerCase());
 const isLater = (o, r) => (o.date || '') > (r.date || '') || (o.date === r.date && (o.created || 0) > (r.created || 0));
 const hasReminder = r => !!r.nextDate || num(r.nextOdo) != null;
-/** A reminder is replaced once a newer record of the same kind exists (e.g. the next service was done). */
-function supersededBy(r) {
-  return vehicleRecords(r.vehicleId).filter(o => o.id !== r.id && sameKind(o, r) && isLater(o, r))
-    .sort((a, b) => (b.date || '').localeCompare(a.date || ''))[0] || null;
+const sameTitleOrBlank = (a, b) => !a.title || !b.title || a.title.trim().toLowerCase() === b.title.trim().toLowerCase();
+/** Did newer record `o` take care of `r`'s reminder? Only if it was done around/after the due date or distance. */
+function fulfils(o, r) {
+  if (r.nextDate && o.date) {
+    const interval = r.date ? Math.max(0, daysBetween(r.date, r.nextDate)) : 0;
+    const win = Math.max(S.settings.leadDays, 30, Math.round(interval * 0.2));
+    if (daysBetween(o.date, r.nextDate) <= win) return true;
+  }
+  if (num(r.nextOdo) != null && num(o.odo)) {
+    const interval = num(r.odo) ? Math.max(0, num(r.nextOdo) - num(r.odo)) : 0;
+    const win = Math.max(S.settings.leadDist, 1000, Math.round(interval * 0.2));
+    if (num(o.odo) >= num(r.nextOdo) - win) return true;
+  }
+  return false;
+}
+/**
+ * Is this record's reminder still live?
+ *  - pinned by you → always active
+ *  - a newer record of the same kind was done around/after the due point → done
+ *  - a newer record of the same kind (same or blank title) sets its own next due → replaced
+ *  - otherwise active (an unrelated newer record never hides it)
+ */
+function reminderStatus(r) {
+  if (!hasReminder(r)) return { active: false };
+  if (r.reminderPinned) return { active: true, pinned: true };
+  const newer = vehicleRecords(r.vehicleId).filter(o => o.id !== r.id && sameKind(o, r) && isLater(o, r))
+    .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  const done = newer.find(o => fulfils(o, r));
+  if (done) return { active: false, why: 'done', by: done };
+  const repl = newer.filter(o => hasReminder(o) && sameTitleOrBlank(o, r)).pop();
+  if (repl) return { active: false, why: 'replaced', by: repl };
+  return { active: true };
+}
+const reminderStatusText = st => st.why === 'done'
+  ? `Done — your ${TYPES[st.by.type].label.toLowerCase()} on ${fmtDate(st.by.date)}${num(st.by.odo) ? ` at ${fmtDist(num(st.by.odo))}` : ''} took care of it.`
+  : `Replaced — your newer “${recTitle(st.by)}” (${fmtDate(st.by.date)}) has its own next due.`;
+/** Reminders not shown because a newer record covers them, but whose due point is still ahead. */
+function hiddenUpcoming(vehicleId) {
+  const odo = vehicleOdo(vehicleById(vehicleId));
+  return vehicleRecords(vehicleId).filter(r => {
+    if (!hasReminder(r) || reminderStatus(r).active) return false;
+    return (r.nextDate && r.nextDate >= todayISO()) || (num(r.nextOdo) != null && num(r.nextOdo) > odo);
+  });
 }
 function getReminders(vehicleId) {
   const v = vehicleById(vehicleId);
@@ -430,7 +470,7 @@ function getReminders(vehicleId) {
   const odo = vehicleOdo(v);
   const out = [];
   for (const r of vehicleRecords(vehicleId)) {
-    if (!hasReminder(r) || supersededBy(r)) continue;
+    if (!reminderStatus(r).active) continue;
     const days = r.nextDate ? daysUntil(r.nextDate) : null;
     const dist = num(r.nextOdo) != null ? num(r.nextOdo) - odo : null;
     let status = 'ok';
@@ -544,7 +584,10 @@ function viewGarage() {
         return `<button class="row tap has-icon" data-action="reminder" data-id="${x.r.id}">${typeIcon(x.r.type)}
           <div class="row-main"><div class="row-title">${esc(recTitle(x.r))}</div><div class="row-sub">${esc(bits)}</div></div>${reminderBadge(x)}</button>`;
       }).join('')}</div>`
-    : `<div class="empty sm">Nothing due. Add a “Next Due” date or ${esc(S.settings.unit)} to your most recent service and it'll appear here.</div>`;
+    : `<div class="empty sm">Nothing due. Add a “Next Due” date or ${esc(S.settings.unit)} to a record and it'll appear here.</div>`;
+  const hidden = hiddenUpcoming(v.id);
+  const hiddenHTML = hidden.length
+    ? `<button class="hidden-link" data-action="hidden-reminders">${hidden.length} reminder${hidden.length === 1 ? '' : 's'} kept as history · see why ${icon('chev')}</button>` : '';
 
   const recentHTML = recs.length
     ? `<div class="group">${recs.slice(0, 5).map(r => recordRow(r)).join('')}</div>`
@@ -572,7 +615,7 @@ function viewGarage() {
     </div>
     ${live.map(activeTripCard).join('')}
     <div class="quick">${quick}</div>
-    <div class="section-title">Upcoming ${reminders.length ? `<span class="count">${reminders.length}</span>` : ''}</div>${remHTML}
+    <div class="section-title">Upcoming ${reminders.length ? `<span class="count">${reminders.length}</span>` : ''}</div>${remHTML}${hiddenHTML}
     <div class="section-title">Recent Activity ${recs.length > 5 ? '<button data-action="tab" data-tab="history">See All</button>' : ''}</div>${recentHTML}`,
   };
 }
@@ -929,8 +972,9 @@ function openRecordForm(existing = null, preset = {}) {
       ${selectField('Or after', 'repeatDist', [['', 'Choose…'], ...[5000, 7500, 10000, 15000, 20000, 30000, 50000].map(n => [n, `${fmtNum(n)} ${S.settings.unit}`])], '')}
       ${inputField('Next date', 'nextDate', r.nextDate, { type: 'date' })}
       ${inputField('Next odometer', 'nextOdo', r.nextOdo, { mode: 'numeric', ph: 'Optional', unit: S.settings.unit })}
+      <div class="field" id="pin-field" hidden><label>Show in Upcoming anyway</label><input type="checkbox" class="switch" name="reminderPinned" ${r.reminderPinned ? 'checked' : ''}></div>
     </div>
-    <div class="section-f" id="due-hint">A reminder appears on the Garage screen as this comes due.</div>
+    <div class="section-f" id="due-hint"></div>
 
     <div class="section-h">Notes</div>
     <div class="group"><div class="field"><textarea name="notes" placeholder="What was done, warranty info, advice from the mechanic…">${esc(r.notes || '')}</textarea></div></div>
@@ -957,12 +1001,20 @@ function openRecordForm(existing = null, preset = {}) {
     $('#parts-sum', sh.body).textContent = t ? `Parts total ${fmtMoney(t)}${F('cost').value ? '' : ' — used as total cost if left blank.'}` : '';
     F('cost').placeholder = t ? t.toFixed(2) : '0.00';
   };
-  const draft = () => ({ ...r, vehicleId: F('vehicleId')?.value || r.vehicleId, type: F('type').value, title: F('title').value.trim(), date: F('date').value });
+  const draft = () => ({
+    ...r, vehicleId: F('vehicleId')?.value || r.vehicleId, type: F('type').value, title: F('title').value.trim(), date: F('date').value,
+    odo: num(F('odo').value) ?? '', nextDate: F('nextDate').value, nextOdo: num(F('nextOdo').value) ?? '', reminderPinned: false,
+  });
   const updateHint = () => {
-    const newer = supersededBy(draft());
-    $('#due-hint', sh.body).textContent = newer
-      ? `Kept as history. You've logged a newer ${TYPES[newer.type].label} (${fmtDate(newer.date)}), so that record's next due is the one shown in Upcoming.`
-      : 'A reminder appears on the Garage screen as this comes due.';
+    const d = draft();
+    const hint = $('#due-hint', sh.body);
+    if (!hasReminder(d)) { hint.textContent = 'Set a next date or odometer and it shows in Upcoming on the Garage screen.'; $('#pin-field', sh.body).hidden = !F('reminderPinned').checked; return; }
+    const st = reminderStatus(d);
+    $('#pin-field', sh.body).hidden = st.active && !F('reminderPinned').checked;
+    hint.innerHTML = st.active
+      ? '<span style="color:var(--green)">✓ This will show in Upcoming.</span>'
+      : F('reminderPinned').checked ? '<span style="color:var(--green)">✓ Pinned: this will show in Upcoming.</span>'
+      : `Kept as history, not shown in Upcoming. ${esc(reminderStatusText(st))} Switch on “Show in Upcoming anyway” if that's not right.`;
   };
   const updateOdoHint = () => {
     const w = checkReading(draft().vehicleId, F('date').value, num(F('odo').value), r.id);
@@ -972,7 +1024,7 @@ function openRecordForm(existing = null, preset = {}) {
 
   form.addEventListener('input', e => {
     if (e.target.closest('.part-row') || e.target.name === 'cost') updateSum();
-    if (e.target.name === 'title') updateHint();
+    if (['title', 'odo', 'nextDate', 'nextOdo'].includes(e.target.name)) updateHint();
     if (e.target.name === 'odo') updateOdoHint();
   });
   form.addEventListener('change', e => {
@@ -986,7 +1038,7 @@ function openRecordForm(existing = null, preset = {}) {
       if (base == null) { toast('Enter the odometer for this record first', false); e.target.value = ''; F('odo').focus(); return; }
       F('nextOdo').value = base + +e.target.value;
     }
-    if (['type', 'vehicleId', 'date', 'title'].includes(n)) updateHint();
+    if (['type', 'vehicleId', 'date', 'title', 'nextDate', 'nextOdo', 'repeatTime', 'repeatDist', 'reminderPinned'].includes(n)) updateHint();
     if (['vehicleId', 'date'].includes(n)) updateOdoHint();
   });
   sh.body.addEventListener('click', async e => {
@@ -1014,13 +1066,15 @@ function openRecordForm(existing = null, preset = {}) {
       odo: num(f.odo) ?? '', cost, workshop: f.workshop.trim(), parts, notes: f.notes.trim(),
       nextDate: f.nextDate || '', nextOdo: num(f.nextOdo) ?? '', updated: Date.now(),
     };
+    out.reminderPinned = !!f.reminderPinned && hasReminder(out);
     await DB.put('records', out);
     const i = S.records.findIndex(x => x.id === out.id);
     if (i >= 0) S.records[i] = out; else S.records.push(out);
     await att.commit({ vehicleId: out.vehicleId, recordId: out.id, baseName: `${recTitle(out)} – Invoice`, category: 'Invoice', date: out.date });
     sortRecords();
     close(); render();
-    toast(isNew ? `Added · ${fmtDate(out.date)}` : 'Saved');
+    const shows = hasReminder(out) && reminderStatus(out).active;
+    toast(`${isNew ? `Added · ${fmtDate(out.date)}` : 'Saved'}${shows ? ' · in Upcoming' : ''}`);
     if (another) setTimeout(() => openRecordForm(null, { vehicleId: out.vehicleId, type: out.type, workshop: out.workshop, date: out.date }), 420);
   }
 }
@@ -1041,7 +1095,7 @@ function openRecordDetail(id) {
   const t = TYPES[r.type] || TYPES.other;
   const v = vehicleById(r.vehicleId);
   const docs = S.docs.filter(d => d.recordId === r.id);
-  const newer = hasReminder(r) ? supersededBy(r) : null;
+  const st = reminderStatus(r);
   const info = [
     ['Vehicle', v?.name], ['Date', fmtDate(r.date)], ['Odometer', num(r.odo) ? fmtDist(num(r.odo)) : ''],
     ['Workshop', r.workshop], ['Total cost', num(r.cost) ? fmtMoney(num(r.cost)) : ''],
@@ -1054,8 +1108,10 @@ function openRecordDetail(id) {
     ${hasReminder(r) ? `<div class="section-h">Next Due</div><div class="group">
         ${r.nextDate ? `<div class="row"><div class="row-main">Date</div><div class="row-value">${esc(fmtDate(r.nextDate))}</div></div>` : ''}
         ${num(r.nextOdo) != null ? `<div class="row"><div class="row-main">Odometer</div><div class="row-value">${esc(fmtDist(num(r.nextOdo)))}</div></div>` : ''}
-        <div class="row"><div class="row-main">Reminder</div><div class="row-value">${newer ? `Replaced by ${esc(fmtDate(newer.date))}` : '<span style="color:var(--green)">Active</span>'}</div></div></div>
-        ${newer && !hasReminder(newer) ? `<button class="btn tinted" style="margin-top:10px" data-act="move">${icon('bell')}Move Reminder to Newer Record</button>` : ''}` : ''}
+        <div class="row"><div class="row-main">In Upcoming</div><div class="row-value">${st.active ? `<span style="color:var(--green)">${st.pinned ? 'Yes · pinned' : 'Yes'}</span>` : 'No · history'}</div></div></div>
+        ${st.active ? '' : `<div class="section-f">${esc(reminderStatusText(st))}</div>`}
+        ${st.pinned ? `<button class="btn tinted" style="margin-top:12px" data-act="unpin">Stop Pinning (back to automatic)</button>`
+          : !st.active ? `<button class="btn tinted" style="margin-top:12px" data-act="pin">${icon('bell')}Show in Upcoming Anyway</button>` : ''}` : ''}
     ${r.notes ? `<div class="section-h">Notes</div><div class="group"><div class="notes">${esc(r.notes)}</div></div>` : ''}
     ${docs.length ? `<div class="section-h">Documents</div><div class="group"><div class="attach-grid">${docs.map(d => `<button class="doc-tile" data-action="open-doc" data-id="${d.id}">${thumbHTML(d)}</button>`).join('')}</div></div>` : ''}
     <button class="btn tinted" data-act="again">${icon('plus')}Log Again</button>`;
@@ -1065,10 +1121,11 @@ function openRecordDetail(id) {
       sh.close();
       setTimeout(() => openRecordForm(null, { vehicleId: r.vehicleId, type: r.type, title: r.title, workshop: r.workshop }), 200);
     }
-    if (e.target.closest('[data-act="move"]')) {
-      newer.nextDate = r.nextDate; newer.nextOdo = r.nextOdo; r.nextDate = ''; r.nextOdo = '';
-      await DB.put('records', newer); await DB.put('records', r);
-      sh.close(); render(); toast('Reminder moved');
+    const pin = e.target.closest('[data-act="pin"],[data-act="unpin"]');
+    if (pin) {
+      r.reminderPinned = pin.dataset.act === 'pin';
+      await DB.put('records', r);
+      sh.close(); render(); toast(r.reminderPinned ? 'Now showing in Upcoming' : 'Back to automatic');
     }
   });
 }
@@ -1546,8 +1603,28 @@ function reminderMenu(id) {
     actions: [
       { label: 'Mark as Done…', handler: () => openRecordForm(null, { vehicleId: r.vehicleId, type: r.type, title: r.title, workshop: r.workshop }) },
       { label: 'View Last Record', handler: () => openRecordDetail(r.id) },
-      { label: 'Clear Reminder', destructive: true, handler: async () => { r.nextDate = ''; r.nextOdo = ''; await DB.put('records', r); render(); toast('Reminder cleared'); } },
+      { label: 'Clear Reminder', destructive: true, handler: async () => { r.nextDate = ''; r.nextOdo = ''; r.reminderPinned = false; await DB.put('records', r); render(); toast('Reminder cleared'); } },
     ],
+  });
+}
+
+function openHiddenReminders() {
+  const v = curVehicle();
+  const list = hiddenUpcoming(v.id);
+  const sh = openSheet({
+    title: 'Kept as History', left: 'Done', dismissable: true,
+    body: `<div class="section-f" style="margin-top:10px;padding:0 4px">These reminders aren't due yet, but a newer record of the same kind already covers them, so they're left out of Upcoming. Tap one and choose “Show in Upcoming Anyway” if it should still be shown.</div>
+      <div class="group" style="margin-top:14px">${list.map(r => {
+        const st = reminderStatus(r);
+        const bits = [r.nextDate ? `Due ${fmtDate(r.nextDate)}` : '', num(r.nextOdo) != null ? `at ${fmtDist(num(r.nextOdo))}` : ''].filter(Boolean).join(' or ');
+        return `<button class="row tap has-icon" data-act="open" data-id="${r.id}">${typeIcon(r.type)}
+          <div class="row-main"><div class="row-title">${esc(recTitle(r))} · ${esc(fmtDate(r.date))}</div><div class="row-sub">${esc(bits)}</div>
+          <div class="row-sub" style="white-space:normal">${esc(reminderStatusText(st))}</div></div>${icon('chev', 'chev')}</button>`;
+      }).join('')}</div>`,
+  });
+  sh.body.addEventListener('click', e => {
+    const el = e.target.closest('[data-act="open"]');
+    if (el) { sh.close(); setTimeout(() => openRecordDetail(el.dataset.id), 250); }
   });
 }
 
@@ -1657,6 +1734,7 @@ const ACTIONS = {
   'new-record': el => openRecordForm(null, { type: el.dataset.type }),
   'open-record': el => openRecordDetail(el.dataset.id),
   'reminder': el => reminderMenu(el.dataset.id),
+  'hidden-reminders': openHiddenReminders,
   'odo': openOdoSheet,
   'spending': openSpendingSheet,
   'scan': () => scanFlow(),
