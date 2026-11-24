@@ -3,8 +3,10 @@
    Garage Log — vehicle service, repair & trip tracker (PWA)
    All data lives on-device in IndexedDB.
    ========================================================= */
-const APP_VERSION = '1.2.1';
+const APP_VERSION = '1.3.0';
 const WHATS_NEW = [
+  ['camera', 'Vehicle photos', 'Add photos of each vehicle: take one or choose several from your library. Tap the camera on the Garage card, or add them under Settings → your vehicle.'],
+  ['star', 'Cover photo', 'Your chosen photo now sits at the top of the Garage card. Tap it to see all photos and pick a different cover. Photos are kept out of Documents and included in backups.'],
   ['bell', 'Reminders fixed', 'A reminder now stays in Upcoming until a later record actually covers it (done around or after the due date or km). Logging an unrelated service in between no longer hides it. Any reminder can also be set to “Show in Upcoming anyway”.'],
   ['gauge', 'Back-fill in any order', 'Old records never change your current odometer. Tap Update on the odometer to see every reading by date; any that don’t fit (an earlier date with a higher reading) are marked ⚠ so you can fix them.'],
   ['car', 'Odometer today vs at purchase', 'Vehicle details now keep “Odometer today” and “Odometer at purchase” separate, with the purchase reading dated on your purchase date.'],
@@ -60,6 +62,8 @@ const ICONS = {
   down: '<path d="M6 9l6 6 6-6"/>',
   updown: '<path d="M8 9l4-4 4 4M8 15l4 4 4-4"/>',
   camera: '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>',
+  star: '<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/>',
   clip: '<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
   gauge: '<path d="M12 14l4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
@@ -374,7 +378,7 @@ function thumbHTML(d) {
     : `<div class="doc-thumb">${icon('doc')}</div>`;
 }
 /* Shared attachment handling for record / trip / expense forms. */
-function attachments(sheetBody, existingDocs) {
+function attachments(sheetBody, existingDocs, { imagesOnly = false } = {}) {
   const removed = new Set();
   const pending = [];
   const paint = () => {
@@ -390,8 +394,8 @@ function attachments(sheetBody, existingDocs) {
     if (!el) return;
     const act = el.dataset.act;
     if (act === 'att-camera' || act === 'att-file') {
-      const files = await pickFiles({ camera: act === 'att-camera', multiple: act === 'att-file' });
-      pending.push(...await processFiles(files)); paint();
+      const files = await pickFiles({ camera: act === 'att-camera', multiple: act === 'att-file', accept: imagesOnly ? 'image/*' : undefined });
+      pending.push(...(await processFiles(files)).filter(p => !imagesOnly || p.mime.startsWith('image/'))); paint();
     }
     if (act === 'rm-att') {
       const [k, id] = el.dataset.key.split(':');
@@ -414,6 +418,63 @@ function attachments(sheetBody, existingDocs) {
       sortDocs();
     },
   };
+}
+
+/* ---------- Vehicle photos ----------
+   Stored in the docs store with kind:'photo' so backup, restore and vehicle delete handle them,
+   but kept out of the Documents tab. vehicle.coverId picks the Garage card photo. */
+const isPhoto = d => d.kind === 'photo';
+const vehiclePhotos = vid => S.docs.filter(d => d.vehicleId === vid && isPhoto(d)).sort((a, b) => (b.created || 0) - (a.created || 0));
+const coverPhoto = v => { const ps = vehiclePhotos(v.id); return ps.find(p => p.id === v.coverId) || ps[ps.length - 1] || null; };
+const photoURLs = new Map();
+function photoURL(d) {
+  if (!photoURLs.has(d.id)) photoURLs.set(d.id, URL.createObjectURL(d.blob));
+  return photoURLs.get(d.id);
+}
+function newPhotoDoc(v, p, i = 0) {
+  return { id: uid(), created: Date.now() + i, vehicleId: v.id, recordId: null, tripId: null, kind: 'photo', name: `${v.name} photo`, category: 'Photo', date: todayISO(), mime: p.mime, blob: p.blob, thumb: p.thumb, size: p.size };
+}
+async function setCover(v, id) {
+  v.coverId = id;
+  await DB.put('vehicles', v);
+}
+async function addVehiclePhotos(v, source) {
+  const files = await pickFiles({ camera: source === 'camera', multiple: source !== 'camera', accept: 'image/*' });
+  const ps = (await processFiles(files)).filter(p => p.mime.startsWith('image/'));
+  if (!ps.length) return 0;
+  const hadCover = !!coverPhoto(v);
+  const added = ps.map((p, i) => newPhotoDoc(v, p, i));
+  for (const d of added) { await DB.put('docs', d); S.docs.push(d); }
+  sortDocs();
+  if (!hadCover) await setCover(v, added[0].id);
+  return added.length;
+}
+function openPhotos(vid = curVehicle().id) {
+  const v = vehicleById(vid);
+  const sh = openSheet({ title: 'Photos', left: 'Done', dismissable: true });
+  const paint = () => {
+    const ps = vehiclePhotos(v.id);
+    const cover = coverPhoto(v);
+    sh.body.innerHTML = `
+      <div class="group" style="margin-top:14px">
+        <button class="row tap link" data-act="take">${icon('camera')}Take Photo</button>
+        <button class="row tap link" data-act="choose">${icon('image')}Choose from Library</button>
+      </div>
+      ${ps.length ? `<div class="section-h">${esc(v.name)} · ${ps.length} photo${ps.length === 1 ? '' : 's'}</div>
+      <div class="photo-grid">${ps.map(p => `<button class="photo-tile" data-act="view" data-id="${p.id}" style="background-image:url('${p.thumb || photoURL(p)}')">${cover?.id === p.id ? '<span class="cover-tag">Cover</span>' : ''}</button>`).join('')}</div>
+      <div class="section-f">Tap a photo to view it, share it or make it the cover on the Garage card.</div>`
+      : `<div class="empty sm" style="margin-top:14px">No photos yet. Add a few of ${esc(v.name)}: the outside, the interior, the odometer, any damage.</div>`}`;
+  };
+  paint();
+  sh.body.addEventListener('click', e => {
+    const el = e.target.closest('[data-act]');
+    if (!el) return;
+    const a = el.dataset.act;
+    if (a === 'take' || a === 'choose') {
+      addVehiclePhotos(v, a === 'take' ? 'camera' : 'file').then(n => { if (n) { paint(); render(); toast(n === 1 ? 'Photo added' : `${n} photos added`); } });
+    }
+    if (a === 'view') openViewer(el.dataset.id, paint);
+  });
 }
 
 /* ---------- Reminders ---------- */
@@ -570,6 +631,8 @@ function viewGarage() {
   const reminders = getReminders(v.id);
   const accent = COLORS[v.accent] || COLORS.blue;
   const live = activeTrips(v.id);
+  const cover = coverPhoto(v);
+  const nPhotos = vehiclePhotos(v.id).length;
 
   const quick = [
     ['new-record', 'service', 'wrench', 'Service', COLORS.blue],
@@ -598,9 +661,11 @@ function viewGarage() {
     action: addBtn(),
     body: `${vehicleSwitcher()}
     <div class="hero" style="--accent:${accent}">
+      ${cover ? `<button class="hero-photo" data-action="photos" aria-label="Photos" style="background-image:url('${photoURL(cover)}')"><span class="photo-count">${icon('image')}${nPhotos}</span></button>` : ''}
       <div class="hero-top">
         <div style="min-width:0"><div class="hero-sub">${esc(vehicleSubtitle(v) || 'Vehicle')}</div><div class="hero-name">${esc(v.name)}</div></div>
-        ${v.reg ? `<div class="plate">${esc(v.reg.toUpperCase())}</div>` : ''}
+        <div class="hero-badges">${v.reg ? `<div class="plate">${esc(v.reg.toUpperCase())}</div>` : ''}
+        ${cover ? '' : `<button class="hero-cam" data-action="photos" aria-label="Add a photo">${icon('camera')}</button>`}</div>
       </div>
       <div class="odo">
         <div><div class="odo-label">Odometer</div><div class="odo-val">${fmtNum(odo)}<span>${esc(S.settings.unit)}</span></div>
@@ -701,7 +766,7 @@ function viewTrips() {
 function viewDocs() {
   if (!S.vehicles.length) return noVehicles('Documents');
   const v = curVehicle();
-  let docs = S.docs.filter(d => d.vehicleId === v.id);
+  let docs = S.docs.filter(d => d.vehicleId === v.id && !isPhoto(d));
   if (S.docCat !== 'all') docs = docs.filter(d => d.category === S.docCat);
   const grid = docs.length
     ? `<div class="doc-grid">${docs.map(d => `<button class="doc-tile" data-action="open-doc" data-id="${d.id}">${thumbHTML(d)}<div class="doc-name">${esc(d.name)}</div><div class="doc-meta">${esc(d.category)} · ${esc(fmtDate(d.date))}</div></button>`).join('')}</div>`
@@ -716,10 +781,10 @@ function viewDocs() {
 
 function viewSettings() {
   const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
-  const vRows = S.vehicles.map(v => `<button class="row tap" data-action="edit-vehicle" data-id="${v.id}">
-      <span class="dot" style="background:${COLORS[v.accent] || COLORS.blue}"></span>
+  const vRows = S.vehicles.map(v => { const c = coverPhoto(v); return `<button class="row tap" data-action="edit-vehicle" data-id="${v.id}">
+      ${c ? `<span class="v-avatar" style="background-image:url('${c.thumb || photoURL(c)}');border-color:${COLORS[v.accent] || COLORS.blue}"></span>` : `<span class="dot" style="background:${COLORS[v.accent] || COLORS.blue}"></span>`}
       <div class="row-main"><div class="row-title">${esc(v.name)}</div><div class="row-sub">${esc([vehicleSubtitle(v), v.reg?.toUpperCase()].filter(Boolean).join(' · ') || 'No details')}</div></div>
-      ${icon('chev', 'chev')}</button>`).join('');
+      ${icon('chev', 'chev')}</button>`; }).join('');
   return {
     title: 'Settings',
     action: '',
@@ -757,7 +822,7 @@ function viewSettings() {
 
     <div class="section-h">&nbsp;</div>
     <div class="group"><button class="row tap danger" data-action="erase">Erase All Data</button></div>
-    <div class="footer-note">Garage Log · v${APP_VERSION}<br>${S.vehicles.length} vehicles · ${S.records.length} records · ${S.trips.length} trips · ${S.docs.length} documents</div>`,
+    <div class="footer-note">Garage Log · v${APP_VERSION}<br>${S.vehicles.length} vehicles · ${S.records.length} records · ${S.trips.length} trips · ${S.docs.filter(d => !isPhoto(d)).length} documents · ${S.docs.filter(isPhoto).length} photos</div>`,
   };
 }
 
@@ -822,6 +887,11 @@ function openVehicleForm(v = null) {
       ${inputField('Name', 'name', d.name, { ph: 'e.g. My Hilux' })}
       ${selectField('Colour tag', 'accent', Object.entries(ACCENTS), d.accent)}
     </div>
+    <div class="section-h">Photos</div>
+    <div class="group"><div class="attach-grid"></div>
+      <button type="button" class="row tap link" data-act="att-camera">${icon('camera')}Take Photo</button>
+      <button type="button" class="row tap link" data-act="att-file">${icon('image')}Choose from Library</button></div>
+    <div class="section-f">The first photo becomes the cover on the Garage card. To change it, tap the photo on the Garage card.</div>
     <div class="section-h">Details</div>
     <div class="group">
       ${inputField('Make', 'make', d.make, { ph: 'Toyota' })}
@@ -858,12 +928,15 @@ function openVehicleForm(v = null) {
       if (newOdo == null) { rec.odo = ''; rec.odoDate = ''; } // cleared: drop the manual reading, records/trips decide
       else if (isNew || newOdo !== vehicleOdo(v)) { rec.odo = newOdo; rec.odoDate = todayISO(); }
       else { rec.odo = v.odo; rec.odoDate = v.odoDate; }
+      await att.commit({ vehicleId: rec.id, baseName: `${rec.name} photo`, category: 'Photo', date: todayISO(), extra: { kind: 'photo' } });
+      rec.coverId = coverPhoto(rec)?.id || '';
       await DB.put('vehicles', rec);
       if (isNew) { S.vehicles.push(rec); S.settings.vehicleId = rec.id; saveSettings(); }
       else Object.assign(v, rec);
       close(); render(); toast(isNew ? 'Vehicle added' : 'Saved');
     },
   });
+  const att = attachments(sh.body, isNew ? [] : vehiclePhotos(v.id), { imagesOnly: true });
   sh.body.addEventListener('click', async e => {
     if (!e.target.closest('[data-act="delete"]')) return;
     const n = vehicleRecords(v.id).length, nt = vehicleTrips(v.id).length;
@@ -1549,9 +1622,13 @@ async function scanFlow(source) {
   if (files.length) openDocForm({ files });
 }
 
-function openViewer(id) {
+function openViewer(id, onChange) {
   const d = S.docs.find(x => x.id === id);
   if (!d) return;
+  const photo = isPhoto(d);
+  const pv = photo && vehicleById(d.vehicleId);
+  const isCover = () => pv && coverPhoto(pv)?.id === d.id;
+  const coverBtn = () => isCover() ? `<span class="v-link muted">${icon('star')}Cover photo</span>` : `<button data-v="cover" class="v-link">${icon('star')}Set as Cover</button>`;
   const url = URL.createObjectURL(d.blob);
   const rec = d.recordId && S.records.find(r => r.id === d.recordId);
   const trip = d.tripId && S.trips.find(t => t.id === d.tripId);
@@ -1560,11 +1637,11 @@ function openViewer(id) {
   w.className = 'viewer-wrap';
   w.innerHTML = `
     <div class="v-top"><button data-v="close">Done</button>
-      <div class="v-title"><div>${esc(d.name)}</div><small>${esc(d.category)} · ${esc(fmtDate(d.date))}${d.size ? ` · ${fmtBytes(d.size)}` : ''}</small></div>
+      <div class="v-title"><div>${esc(photo && pv ? pv.name : d.name)}</div><small>${esc(photo ? 'Photo' : d.category)} · ${esc(fmtDate(d.date))}${d.size ? ` · ${fmtBytes(d.size)}` : ''}</small></div>
       <button data-v="share" aria-label="Share">${icon('share')}</button></div>
     <div class="v-body">${isImg ? `<img src="${url}" alt="${esc(d.name)}">` : `<div class="pdf-card">${icon('doc')}<div>${esc(d.name)}</div><a class="btn inline" href="${url}" target="_blank" rel="noopener">Open Document</a></div>`}</div>
-    <div class="v-bottom">${rec ? `<button data-v="rec" class="v-link">${icon('clip')}${esc(recTitle(rec))}</button>` : trip ? `<button data-v="trip" class="v-link">${icon('route')}${esc(tripName(trip))}</button>` : '<span></span>'}
-      <div class="v-actions"><button data-v="edit">Details</button><button data-v="del" class="red" aria-label="Delete">${icon('trash')}</button></div></div>`;
+    <div class="v-bottom">${photo ? `<span class="v-cover">${coverBtn()}</span>` : rec ? `<button data-v="rec" class="v-link">${icon('clip')}${esc(recTitle(rec))}</button>` : trip ? `<button data-v="trip" class="v-link">${icon('route')}${esc(tripName(trip))}</button>` : '<span></span>'}
+      <div class="v-actions">${photo ? '' : '<button data-v="edit">Details</button>'}<button data-v="del" class="red" aria-label="Delete">${icon('trash')}</button></div></div>`;
   $('#overlay').appendChild(w);
   lockScroll();
   requestAnimationFrame(() => w.classList.add('open'));
@@ -1583,11 +1660,19 @@ function openViewer(id) {
       close(); $$('.sheet-wrap').forEach(s => s.remove());
       setTimeout(() => a === 'rec' ? openRecordDetail(rec.id) : openTripDetail(trip.id), 200);
     }
+    if (a === 'cover') {
+      await setCover(pv, d.id);
+      $('.v-cover', w).innerHTML = coverBtn();
+      render(); onChange?.(); toast('Cover photo set');
+    }
     if (a === 'del') {
-      if (!await confirmDestructive('Delete this document?', 'This cannot be undone.', 'Delete Document')) return;
+      const what = photo ? 'Photo' : 'Document';
+      if (!await confirmDestructive(`Delete this ${what.toLowerCase()}?`, 'This cannot be undone.', `Delete ${what}`)) return;
       await DB.del('docs', d.id);
       S.docs = S.docs.filter(x => x.id !== d.id);
-      close(); render(); toast('Document deleted');
+      if (photoURLs.has(d.id)) { URL.revokeObjectURL(photoURLs.get(d.id)); photoURLs.delete(d.id); }
+      if (pv && pv.coverId === d.id) await setCover(pv, coverPhoto(pv)?.id || '');
+      close(); render(); onChange?.(); toast(`${what} deleted`);
     }
   });
 }
@@ -1641,6 +1726,7 @@ function addMenu() {
       { label: 'Other Record…', handler: t('other') },
       live ? { label: 'Add Trip Expense', handler: () => openExpenseSheet(live.id, null, 'fuel') } : { label: 'Start a Trip', handler: () => openTripForm() },
       { label: 'Scan Invoice / Document', handler: () => scanFlow() },
+      { label: 'Vehicle Photos', handler: () => openPhotos(v.id) },
       { label: 'Update Odometer', handler: openOdoSheet },
     ],
   });
@@ -1739,6 +1825,7 @@ const ACTIONS = {
   'spending': openSpendingSheet,
   'scan': () => scanFlow(),
   'open-doc': el => openViewer(el.dataset.id),
+  'photos': () => openPhotos(),
   'add-vehicle': () => openVehicleForm(),
   'edit-vehicle': el => openVehicleForm(vehicleById(el.dataset.id)),
   'new-trip': () => openTripForm(),

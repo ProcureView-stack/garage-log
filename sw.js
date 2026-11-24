@@ -1,6 +1,6 @@
 // Garage Log service worker — network-first for the app shell, cache fallback for offline use.
 // Only app files are cached here. Your vehicle data lives in IndexedDB and is never touched by updates.
-const CACHE = 'garage-log-1.2.1';
+const CACHE = 'garage-log-1.3.0';
 const ASSETS = [
   './', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',

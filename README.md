@@ -5,6 +5,7 @@ It installs to the iPhone home screen and runs full-screen and offline. All data
 
 ## Features
 - **Garage**: switch between vehicles, see the odometer, spend this year, upcoming reminders (overdue / due soon / OK) and recent activity.
+- **Vehicle photos**: take or choose photos of each vehicle. The cover photo heads the Garage card; tap it to open the gallery and change the cover.
 - **Records**: Service, Repair, Parts Replacement, Tyres, Brakes, Battery, Inspection/Roadworthy, Licence Renewal, Insurance or Other. Each record holds the date, odometer, workshop, cost, an itemised parts & labour list, notes and next-due date/odometer, with quick presets such as "1 year" or "15 000 km".
 - **Documents**: scan invoices with the camera or attach photos or PDFs. Each document gets a category and can be linked to a record.
 - **History**: grouped by month, with a type filter and search across parts, part numbers, workshops and notes.
